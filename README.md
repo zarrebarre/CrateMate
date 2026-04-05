@@ -18,16 +18,22 @@ CrateMate was built specifically for DJs who want to go from a messy downloads f
 **Requirements:** Python 3.10+ and optionally [FFmpeg](https://ffmpeg.org/) (for FLAC conversion and bitrate analysis).
 
 ```bash
-# Install
+# Clone the repo
+git clone https://github.com/zarrebarre/CrateMate.git
+cd CrateMate
+
+# Install as a CLI command
 pip install .
 
 # Run
 cratemate        # opens interactive menu with first-run setup wizard
 ```
 
-Or run without installing:
+Or run directly without installing:
 
 ```bash
+git clone https://github.com/zarrebarre/CrateMate.git
+cd CrateMate
 pip install -r requirements.txt
 python3 cratemate.py
 ```
