@@ -6,13 +6,13 @@
 
 A command-line tool that cleans up downloaded music files and organizes them into a DJ-ready library. Parses filenames, fetches cover art and genre metadata from Spotify and Discogs, optionally uses Gemini AI for intelligent tagging, and copies everything to your library with clean names and embedded tags.
 
-**Your originals are never touched.** CrateMate only copies — never moves or deletes source files during import.
+**Your originals are never touched.** CrateMate only copies, never moves or deletes source files during import.
 
 ## Why this exists
 
-Existing tools like beets and MusicBrainz Picard are built for general music libraries. They constantly mismatch remixes and extended mixes with original versions, require manual confirmation for every file, and don't handle the messy filenames you get from Bandcamp, Beatport, or various download sources. For electronic music — where the correct metadata is almost always already in the filename — they're overkill and often wrong.
+I built this because I needed something specifically for electronic music and DJing. General-purpose taggers like beets and MusicBrainz Picard are great tools, but my workflow needed something more opinionated: for electronic music the correct metadata is almost always already in the filename, so I wanted a tool that trusts the filename first, fetches art and genre automatically, and gets out of the way.
 
-CrateMate was built specifically for DJs who want to go from a messy downloads folder to a clean, tagged, cover-art-embedded library ready for Rekordbox, Traktor, or Serato — with zero manual matching.
+CrateMate takes a messy downloads folder and turns it into a clean, tagged, cover-art-embedded library ready for Rekordbox, Traktor, or Serato with zero manual matching.
 
 ## Quick start
 
@@ -39,14 +39,14 @@ On first run, a setup wizard walks you through configuring your library path and
 For each music file in a source folder:
 
 1. **Parses the filename** to extract artist, title, and mix info (Extended Mix, Remix, etc.)
-2. **(Optional) Gemini AI fixing** — sends filenames to Gemini to handle names that regex can't parse
+2. **(Optional) Gemini AI fixing** - sends filenames to Gemini to handle names that regex can't parse
 3. **Falls back to existing ID3/FLAC tags** if the filename is missing info
 4. **Searches Spotify** for album cover art and genre
 5. **Falls back to Discogs** if Spotify has no result
 6. **Strips existing album art** (removes promo images, low-res junk)
 7. **Copies** the file to `~/Music/DJ_Library/Artist - Title (Mix).ext`
 8. **Writes clean tags** (artist, title, genre) and embeds high-quality cover art
-9. **Shows import statistics** — files processed, art sources, genre breakdown, total size, duration
+9. **Shows import statistics** - files processed, art sources, genre breakdown, total size, duration
 
 ## Features
 
@@ -57,7 +57,7 @@ The core import flow: parse filenames, fetch metadata from Spotify/Discogs, copy
 Re-scans the library and fetches album art for any files missing cover images. Uses the same Spotify/Discogs lookup.
 
 ### Fix tags from Spotify
-Updates album, year, and genre tags from Spotify for existing library files. Never changes artist, title, or duration — only supplementary metadata.
+Updates album, year, and genre tags from Spotify for existing library files. Never changes artist, title, or duration - only supplementary metadata.
 
 ### Remove duplicates
 Finds duplicate tracks by comparing normalized artist/title. Keeps the highest-quality version (FLAC > MP3, higher bitrate > lower).
@@ -160,7 +160,7 @@ On first run, a setup wizard walks through everything. Change settings anytime v
 
 ### API keys
 
-All keys are optional — CrateMate degrades gracefully if any are missing.
+All keys are optional - CrateMate degrades gracefully if any are missing.
 
 | Key | Purpose | Get it |
 |-----|---------|--------|
