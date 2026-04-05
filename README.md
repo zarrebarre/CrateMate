@@ -1,5 +1,6 @@
 # CrateMate
 
+[![PyPI version](https://img.shields.io/pypi/v/cratemate)](https://pypi.org/project/cratemate/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB.svg)](https://python.org)
 
@@ -18,24 +19,17 @@ CrateMate was built specifically for DJs who want to go from a messy downloads f
 **Requirements:** Python 3.10+ and optionally [FFmpeg](https://ffmpeg.org/) (for FLAC conversion and bitrate analysis).
 
 ```bash
-# Clone the repo
-git clone https://github.com/zarrebarre/CrateMate.git
-cd CrateMate
-
-# Install as a CLI command
-pip install .
-
-# Run
-cratemate        # opens interactive menu with first-run setup wizard
+pip install cratemate
+cratemate              # opens interactive menu with first-run setup wizard
 ```
 
-Or run directly without installing:
+Or install from source:
 
 ```bash
 git clone https://github.com/zarrebarre/CrateMate.git
 cd CrateMate
-pip install -r requirements.txt
-python3 cratemate.py
+pip install .
+cratemate
 ```
 
 On first run, a setup wizard walks you through configuring your library path and API keys. Everything is stored in `~/.config/cratemate/`.
