@@ -1,5 +1,9 @@
 # CrateMate
 
+<p align="center">
+  <img src="logo.png" alt="CrateMate" width="500">
+</p>
+
 [![PyPI version](https://img.shields.io/pypi/v/cratemate)](https://pypi.org/project/cratemate/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB.svg)](https://python.org)
