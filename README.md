@@ -85,7 +85,7 @@ Spectral analysis to identify files that claim to be high-quality but were trans
 Reverses the last destructive operation (batch rename, genre organize). Undo log stored at `~/.config/cratemate/undo_log.json`.
 
 ### Live progress
-Long-running operations show a live counter and ETA next to the animated waveform (e.g. `47/200 · ~12s left`). Confirmation prompts pause the animation while you type so YES/N input is never mangled by the redraw thread.
+Long-running operations show a single-line progress indicator with counter, ETA, and a static waveform — `♪ Analyzing  47/200 · ~12s left  ▁▂▃▄▅▆▇  ♪`. The bar overwrites itself in place and steps out of the way before per-file output and confirmation prompts, so output and YES/N input are always cleanly visible.
 
 ## Interactive menu
 

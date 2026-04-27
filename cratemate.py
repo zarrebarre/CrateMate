@@ -995,11 +995,14 @@ def process_folder(folder: str | Path, library_dir: Path, dry_run: bool = False,
         print(f"  Gemini fixed {len(gemini_names)}/{len(files)} filenames\n")
 
     stats = ImportStats(total_files=len(files), start_time=time.time())
+    progress = _start_progress(len(files), "Importing")
 
     for i, f in enumerate(files, 1):
-        _progress(i, len(files))
+        progress.update(i - 1, f"Importing {f.name[:40]}")
         process_file(f, library_dir, dry_run, gemini_names, source_folder=folder, stats=stats, convert_flac=convert_flac)
+        progress.update(i)
 
+    _end_progress(progress)
     print_import_summary(stats)
     print(f"Library: {library_dir}")
 
@@ -1031,32 +1034,37 @@ def fix_covers(library_dir: str | Path, dry_run: bool = False) -> None:
     if dry_run:
         print("DRY RUN — no files will be modified\n")
 
-    for i, filepath in enumerate(missing, 1):
-        _progress(i, len(missing))
-        artist, title, _mix = parse_library_filename(filepath)
+    progress = _start_progress(len(missing), "Fetching covers")
+    try:
+        for i, filepath in enumerate(missing, 1):
+            progress.set_message(f"Fetching cover for {filepath.name[:40]}")
+            artist, title, _mix = parse_library_filename(filepath)
 
-        print(f"\n  {filepath.name}")
+            print(f"\n  {filepath.name}")
 
-        art_data, source = search_cover_art(artist, title)
-        if art_data:
+            art_data, source = search_cover_art(artist, title)
+            if not art_data:
+                print(f"    Still no cover found")
+                progress.update(i)
+                continue
             print(f"    Cover art: {source}")
-        else:
-            print(f"    Still no cover found")
-            continue
 
-        if dry_run:
-            print(f"    (dry run — not writing)")
-            continue
+            if dry_run:
+                print(f"    (dry run — not writing)")
+                progress.update(i)
+                continue
 
-        # Write art directly to the library file
-        try:
-            mf = mediafile.MediaFile(str(filepath))
-            mf.art = art_data
-            mf.save()
-            print(f"    Cover embedded!")
-        except Exception as e:
-            print(f"    Warning: couldn't write art: {e}")
-
+            # Write art directly to the library file
+            try:
+                mf = mediafile.MediaFile(str(filepath))
+                mf.art = art_data
+                mf.save()
+                print(f"    Cover embedded!")
+            except Exception as e:
+                print(f"    Warning: couldn't write art: {e}")
+            progress.update(i)
+    finally:
+        _end_progress(progress)
     print(f"\nDone! Library: {library_dir}")
 
 
@@ -1080,8 +1088,9 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
     updated = 0
     skipped = 0
 
+    progress = _start_progress(len(files), "Fixing tags")
     for i, filepath in enumerate(files, 1):
-        _progress(i, len(files))
+        progress.set_message(f"Fixing {filepath.name[:40]}")
         artist, title_clean, _mix = parse_library_filename(filepath)
 
         print(f"\n  {filepath.name}")
@@ -1093,6 +1102,7 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
         if not spotify:
             print(f"    Spotify: no match — skipping")
             skipped += 1
+            progress.update(i)
             continue
 
         # Read current tags
@@ -1101,6 +1111,7 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
         except Exception as e:
             print(f"    Error reading file: {e}")
             skipped += 1
+            progress.update(i)
             continue
 
         # Determine what needs updating
@@ -1138,6 +1149,7 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
 
         if not changes:
             print(f"    Tags already good")
+            progress.update(i)
             continue
 
         for field, old, new in changes:
@@ -1145,6 +1157,7 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
 
         if dry_run:
             print(f"    (dry run — not writing)")
+            progress.update(i)
             continue
 
         # Write only the safe tags
@@ -1168,7 +1181,9 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
         except Exception as e:
             print(f"    Warning: couldn't write tags: {e}")
             skipped += 1
+        progress.update(i)
 
+    _end_progress(progress)
     print(f"\nDone! Updated {updated} file(s), skipped {skipped}. Library: {library_dir}")
 
 
@@ -1226,8 +1241,9 @@ def remove_duplicates(library_dir: str | Path, dry_run: bool = False) -> None:
     freed = 0
 
     sorted_dupes = sorted(dupes.items())
+    progress = _start_progress(len(sorted_dupes), "Removing duplicates")
     for i, ((artist, title), group) in enumerate(sorted_dupes, 1):
-        _progress(i, len(sorted_dupes))
+        progress.update(i - 1)
         # Sort by quality — first entry is the keeper
         group.sort(key=quality_score)
         keeper = group[0]
@@ -1248,7 +1264,9 @@ def remove_duplicates(library_dir: str | Path, dry_run: bool = False) -> None:
             else:
                 freed += f.stat().st_size
         print()
+        progress.update(i)
 
+    _end_progress(progress)
     freed_mb = freed / (1024 * 1024)
     if dry_run:
         print(f"Would remove {total_dupes} file(s), freeing ~{freed_mb:.1f}MB")
@@ -1337,14 +1355,17 @@ def clean_source_folder(source_dir: str | Path, library_dir: str | Path,
 
     deleted = 0
     freed = 0
+    progress = _start_progress(len(matches), "Deleting source files")
     for i, (sf, _) in enumerate(matches, 1):
-        _progress(i, len(matches))
+        progress.set_message(f"Deleting {sf.name[:40]}")
         try:
             freed += sf.stat().st_size
             sf.unlink()
             deleted += 1
         except Exception as e:
             print(f"  {C_RED}Error deleting {sf.name}: {e}{C_RESET}")
+        progress.update(i)
+    _end_progress(progress)
 
     freed_mb = freed / (1024 * 1024)
     freed_str = f"{freed_mb / 1024:.2f} GB" if freed_mb >= 1024 else f"{freed_mb:.1f} MB"
@@ -1421,8 +1442,9 @@ def batch_convert_flac(library_dir: str | Path, dry_run: bool = False,
     skipped = 0
     total_saved = 0
 
+    progress = _start_progress(total, "Converting FLACs")
     for i, flac_path in enumerate(flac_files, 1):
-        _progress(i, total)
+        progress.update(i - 1, f"Converting {flac_path.name[:40]}")
         mp3_path = flac_path.with_suffix(".mp3")
         flac_size = flac_path.stat().st_size
         flac_mb = flac_size / (1024 * 1024)
@@ -1430,6 +1452,7 @@ def batch_convert_flac(library_dir: str | Path, dry_run: bool = False,
         if mp3_path.exists():
             print(f"  {i}/{total}  {C_DIM}{flac_path.name} → MP3 already exists, skipping{C_RESET}")
             skipped += 1
+            progress.update(i)
             continue
 
         if dry_run:
@@ -1437,22 +1460,25 @@ def batch_convert_flac(library_dir: str | Path, dry_run: bool = False,
             print(f"  {i}/{total}  {flac_path.name} → .mp3  {C_DIM}[{flac_mb:.1f} MB → ~{est_mp3_mb:.1f} MB]{C_RESET}")
             converted += 1
             total_saved += int(flac_size * 0.72)
+            progress.update(i)
             continue
 
-        print(f"  {i}/{total}  {flac_path.name} → .mp3", end="", flush=True)
         if convert_flac_to_mp3(flac_path, mp3_path):
             mp3_size = mp3_path.stat().st_size
             saved_mb = (flac_size - mp3_size) / (1024 * 1024)
-            print(f"  {C_DIM}[{flac_mb:.1f} MB → {mp3_size / (1024*1024):.1f} MB]{C_RESET}  {C_GREEN}✓{C_RESET}")
+            print(f"  {i}/{total}  {flac_path.name} → .mp3  "
+                  f"{C_DIM}[{flac_mb:.1f} MB → {mp3_size / (1024*1024):.1f} MB]{C_RESET}  {C_GREEN}✓{C_RESET}")
             if not keep_original:
                 flac_path.unlink()
             total_saved += flac_size - mp3_size
             converted += 1
         else:
-            print(f"  {C_RED}✗ failed{C_RESET}")
+            print(f"  {i}/{total}  {flac_path.name} → .mp3  {C_RED}✗ failed{C_RESET}")
             mp3_path.unlink(missing_ok=True)
             skipped += 1
+        progress.update(i)
 
+    _end_progress(progress)
     saved_mb = total_saved / (1024 * 1024)
     saved_str = f"{saved_mb / 1024:.2f} GB" if saved_mb >= 1024 else f"{saved_mb:.1f} MB"
     if dry_run:
@@ -1608,8 +1634,10 @@ def ai_genre_tag(library_dir: str | Path, dry_run: bool = False,
     hints: list[str] = []
     spotify_genre_cache: dict[str, str | None] = {}  # artist name → genre
 
+    enrich_progress = _start_progress(total, "Looking up genre hints")
     for i, (artist, title, mix) in enumerate(tracks, 1):
-        _progress(i, total)
+        label = artist if artist else title
+        enrich_progress.set_message(f"Looking up {label[:40]}")
         hint_parts: list[str] = []
 
         # Spotify — cache by artist (genres are artist-level)
@@ -1633,11 +1661,9 @@ def ai_genre_tag(library_dir: str | Path, dry_run: bool = False,
                 hint_parts.append(f"discogs: {dc_genre}")
 
         hints.append(" | ".join(hint_parts))
+        enrich_progress.update(i)
 
-        if i % 20 == 0 or i == total:
-            enriched = sum(1 for h in hints if h)
-            print(f"    {i}/{total} looked up ({enriched} with genre data)")
-
+    _end_progress(enrich_progress)
     enriched_count = sum(1 for h in hints if h)
     print(f"\n  API coverage: {enriched_count}/{total} tracks have genre hints")
 
@@ -1665,8 +1691,9 @@ def ai_genre_tag(library_dir: str | Path, dry_run: bool = False,
     else:
         print(f"\n  Writing genre tags...")
         tagged = 0
+        write_progress = _start_progress(len(files), "Writing genre tags")
         for i, (filepath, genre) in enumerate(zip(files, genres), 1):
-            _progress(i, len(files))
+            write_progress.set_message(f"Tagging {filepath.name[:40]}")
             try:
                 mf = mediafile.MediaFile(str(filepath))
                 if mf.genre != genre:
@@ -1675,6 +1702,8 @@ def ai_genre_tag(library_dir: str | Path, dry_run: bool = False,
                     tagged += 1
             except Exception as e:
                 print(f"    {C_RED}Error tagging {filepath.name}: {e}{C_RESET}")
+            write_progress.update(i)
+        _end_progress(write_progress)
         print(f"  Updated {tagged} file(s)")
 
     # Organize into genre subfolders
@@ -1689,22 +1718,22 @@ def ai_genre_tag(library_dir: str | Path, dry_run: bool = False,
     moved = 0
     skipped = 0
     undo_actions: list[dict] = []
-    # Reset progress counter so the organize phase has its own clock/ETA
-    if _active_loader is not None:
-        _active_loader.reset_progress()
+    organize_progress = _start_progress(len(files), "Organizing into genre folders")
     for i, (filepath, genre) in enumerate(zip(files, genres), 1):
-        _progress(i, len(files))
+        organize_progress.set_message(f"Moving {filepath.name[:40]}")
         genre_dir = library_dir / safe_filename(genre)
         dest = genre_dir / filepath.name
 
         # Already in the correct genre folder
         if filepath.parent == genre_dir:
+            organize_progress.update(i)
             continue
 
         # Name collision at destination
         if dest.exists():
             print(f"    {C_YELLOW}skip{C_RESET} {filepath.name} — already exists in {genre}/")
             skipped += 1
+            organize_progress.update(i)
             continue
 
         if dry_run:
@@ -1715,6 +1744,9 @@ def ai_genre_tag(library_dir: str | Path, dry_run: bool = False,
             shutil.move(str(filepath), str(dest))
             undo_actions.append({"type": "move", "src": str(filepath), "dest": str(dest)})
             moved += 1
+        organize_progress.update(i)
+
+    _end_progress(organize_progress)
 
     if dry_run:
         print(f"\n  Would move {moved} file(s) into genre folders")
@@ -2063,12 +2095,17 @@ def analyze_bitrate_quality(library_dir: str | Path,
     results_fake = []
     skipped = 0
     start_time = time.time()
+    progress = _start_progress(total, "Analyzing bitrates")
 
     for i, filepath in enumerate(files, 1):
-        _progress(i, total)
         name = filepath.name
         suffix = filepath.suffix.lower()
         is_lossless = suffix in LOSSLESS_EXTENSIONS
+
+        # Show what we're about to analyze before the slow FFmpeg+FFT pass
+        # so the bar reflects the file currently in flight, not the last one
+        # that finished.
+        progress.update(i - 1, f"Analyzing {name[:40]}")
 
         # Get claimed bitrate
         try:
@@ -2092,8 +2129,9 @@ def analyze_bitrate_quality(library_dir: str | Path,
         result = detect_spectral_cutoff(filepath, np)
 
         if result is None:
-            print(f"  {C_DIM}{i:>4}/{total}  {name:<50} {bitrate_label:<10} skipped (too short or unreadable){C_RESET}")
+            _print(f"  {C_DIM}{i:>4}/{total}  {name:<50} {bitrate_label:<10} skipped (too short or unreadable){C_RESET}")
             skipped += 1
+            progress.update(i)
             continue
 
         band_ratio, cutoff_khz, _ = result
@@ -2121,8 +2159,10 @@ def analyze_bitrate_quality(library_dir: str | Path,
         # Truncate name to fit
         max_name = 45
         display_name = name if len(name) <= max_name else name[:max_name - 2] + ".."
-        print(f"  {color}{i:>4}/{total}  {display_name:<{max_name}}  {bitrate_label:<10} cutoff: {cutoff_str:<9} {verdict_str}{C_RESET}")
+        _print(f"  {color}{i:>4}/{total}  {display_name:<{max_name}}  {bitrate_label:<10} cutoff: {cutoff_str:<9} {verdict_str}{C_RESET}")
+        progress.update(i)
 
+    _end_progress(progress)
     elapsed = time.time() - start_time
 
     # Summary
@@ -2241,8 +2281,9 @@ def undo_last_operation() -> None:
 
     undone = 0
     errors = 0
+    progress = _start_progress(len(actions), "Reverting actions")
     for i, a in enumerate(actions, 1):
-        _progress(i, len(actions))
+        progress.update(i - 1)
         try:
             src = Path(a["src"])
             dest = Path(a["dest"])
@@ -2266,7 +2307,9 @@ def undo_last_operation() -> None:
         except Exception as e:
             print(f"    {C_RED}Error: {e}{C_RESET}")
             errors += 1
+        progress.update(i)
 
+    _end_progress(progress)
     _clear_undo()
     print(f"\n  {C_GREEN}Undone {undone} action(s){C_RESET}" +
           (f", {C_RED}{errors} error(s){C_RESET}" if errors else ""))
@@ -2361,8 +2404,9 @@ def batch_rename_library(library_dir: str | Path, dry_run: bool = False) -> None
     # Execute renames and build undo log
     undo_actions: list[dict] = []
     renamed = 0
+    progress = _start_progress(len(renames), "Renaming")
     for i, (old_path, new_path) in enumerate(renames, 1):
-        _progress(i, len(renames))
+        progress.update(i - 1, f"Renaming {old_path.name[:40]}")
         try:
             # Also update tags to match new filename
             artist, title, mix = gemini_names[str(old_path)]
@@ -2383,7 +2427,9 @@ def batch_rename_library(library_dir: str | Path, dry_run: bool = False) -> None
 
         except Exception as e:
             print(f"    {C_RED}Error renaming {old_path.name}: {e}{C_RESET}")
+        progress.update(i)
 
+    _end_progress(progress)
     _save_undo("Batch rename (Gemini)", undo_actions)
     print(f"\n  {C_GREEN}Renamed {renamed} file(s){C_RESET}")
     if skipped_same:
@@ -2410,7 +2456,7 @@ C_GRAY = "\033[38;5;244m"
 C_BLUE = "\033[38;5;69m"
 C_BLUE_LT = "\033[38;5;111m"
 
-VERSION = "v1.4.1"
+VERSION = "v1.4.2"
 
 # ── SPLASH LOGO ────────────────────────────────────────────────────────────
 
@@ -2630,7 +2676,6 @@ class WaveformLoader:
 
     def start(self):
         """Start the waveform animation."""
-        global _active_loader
         if self._running:
             return
         self._running = True
@@ -2654,17 +2699,12 @@ class WaveformLoader:
         # Replace sys.stdout with the serialized wrapper
         sys.stdout = _WaveStdout(raw, self._lock, self)
 
-        # Register as the active loader so module-level progress/prompt helpers
-        # can find us. Only one loader is expected to be active at a time.
-        _active_loader = self
-
         # Start the animation thread
         self._thread = threading.Thread(target=self._animate, daemon=True)
         self._thread.start()
 
     def stop(self):
         """Stop the waveform animation and restore the terminal."""
-        global _active_loader
         if not self._running:
             return
         self._running = False
@@ -2685,8 +2725,6 @@ class WaveformLoader:
             raw.flush()
 
         self._original_stdout = None
-        if _active_loader is self:
-            _active_loader = None
 
     def update_message(self, message: str):
         """Update the status message shown alongside the waveform."""
@@ -2710,20 +2748,6 @@ class WaveformLoader:
             self._total = 0
             self._progress_started_at = 0.0
 
-    def pause(self):
-        """Temporarily stop the animation so input() and other terminal-
-        sensitive operations can run cleanly. Use with resume() or via the
-        paused() context manager."""
-        self.stop()
-
-    def resume(self):
-        """Restart the animation after pause(). Preserves message and progress."""
-        self.start()
-
-    def paused(self):
-        """Context manager that pauses the loader on enter and resumes on exit."""
-        return _LoaderPause(self)
-
     def __enter__(self):
         self.start()
         return self
@@ -2732,59 +2756,240 @@ class WaveformLoader:
         self.stop()
 
 
-# ── ACTIVE-LOADER HELPERS ───────────────────────────────────────────────────
+# ── INLINE PROGRESS BAR ─────────────────────────────────────────────────────
 #
-# Long-running operations are wrapped in `with WaveformLoader(...)` from the
-# interactive menu, but the actual functions are the ones that know their
-# progress and need to ask the user questions. These module-level helpers let
-# any function update the visible progress counter and pause the animation
-# around input() prompts, without having to thread a loader reference through
-# every call site.
+# The bottom-anchored WaveformLoader was visually nice but unreliable: setting
+# a scroll region and using cursor save/restore broke per-file output on some
+# terminals (Apple Terminal in particular), and the constant redraw thread
+# corrupted input() prompts. For long-running operations we now use a simple
+# tqdm-style inline progress line: a single line, overwritten with \r, that
+# carries a small static waveform plus counter and ETA. Cleared before any
+# permanent print so per-file output is guaranteed to be visible.
+#
+# A module-level _active_progress lets any function update the counter or
+# clear the line before printing without threading a reference through every
+# call site.
 
-_active_loader: "WaveformLoader | None" = None
+
+class _ProgressStdout:
+    """sys.stdout wrapper installed by an active InlineProgress.
+
+    Every write() clears the inline bar (if currently rendered), passes the
+    text through to the real stdout, and — if the text ended with a newline,
+    leaving the cursor on a fresh blank line — redraws the bar there.
+    Result: any plain print() call from any helper function shows up cleanly
+    above the bar, no scroll-region or cursor-save trickery."""
+
+    def __init__(self, original, progress: "InlineProgress"):
+        self._original = original
+        self._progress = progress
+
+    def write(self, text):
+        if not text:
+            return 0
+        prog = self._progress
+        if prog._line_active:
+            self._original.write("\r\033[K")
+            prog._line_active = False
+        n = self._original.write(text)
+        # Flush so per-file output appears immediately rather than buffered
+        # behind a slow ffprobe / API call.
+        self._original.flush()
+        if text.endswith("\n"):
+            prog._render(force=True)
+        return n
+
+    def flush(self):
+        self._original.flush()
+
+    def isatty(self):
+        try:
+            return self._original.isatty()
+        except Exception:
+            return False
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
 
 
-class _LoaderPause:
-    """Context manager that pauses a loader on enter and resumes on exit."""
+class InlineProgress:
+    """A single-line, \\r-overwriting progress indicator.
 
-    def __init__(self, loader: "WaveformLoader | None"):
-        self._loader = loader
-        self._was_running = False
+    Renders "  ♪ Message  47/200 · ~12s left  ▁▂▃▄▅▆▇  ♪" at the cursor
+    position. While active it wraps sys.stdout so every print() in the
+    operation transparently clears the bar before writing and redraws the
+    bar afterward — no need to thread a clear() call through helper
+    functions.
+    """
+
+    _MIN_REDRAW_INTERVAL = 0.08  # ~12fps cap
+
+    def __init__(self, total: int, message: str = "Working"):
+        self.total = max(1, total)
+        self.current = 0
+        self.message = message
+        self._started_at = time.time()
+        self._last_render_at = 0.0
+        self._line_active = False
+        # Capture isatty() against the *original* stdout. Some terminals
+        # (TTY pipes, IDE consoles) report False — in that case we render
+        # nothing and let plain print() output flow through.
+        self._isatty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+        self._original_stdout = None
+
+    def _format_eta(self) -> str:
+        if self.current <= 0:
+            return ""
+        elapsed = time.time() - self._started_at
+        if elapsed < 0.4:
+            return ""
+        per = elapsed / self.current
+        remaining = max(0, self.total - self.current) * per
+        if remaining < 1:
+            return "almost done"
+        if remaining < 60:
+            return f"~{int(remaining)}s left"
+        if remaining < 3600:
+            mins = int(remaining // 60)
+            secs = int(remaining % 60)
+            return f"~{mins}m{secs:02d}s left"
+        hrs = int(remaining // 3600)
+        mins = int((remaining % 3600) // 60)
+        return f"~{hrs}h{mins:02d}m left"
+
+    def _build_line(self) -> str:
+        w = max(40, get_term_width())
+        counter = f"{self.current}/{self.total}"
+        eta = self._format_eta()
+        eta_str = f" {C_DIM}· {eta}{C_RESET}" if eta else ""
+        eta_vis = (len(eta) + 3) if eta else 0
+
+        # Truncate long messages so the counter and ETA are always visible.
+        max_msg = max(10, w - 16 - len(counter) - eta_vis - 30)
+        msg = self.message if len(self.message) <= max_msg else self.message[: max_msg - 1] + "…"
+
+        prefix_vis = 4 + len(msg) + 2 + len(counter) + eta_vis + 2
+        suffix_vis = 3
+        wave_width = max(0, min(24, w - prefix_vis - suffix_vis))
+
+        wave = _static_waveform(wave_width) if wave_width > 0 else ""
+        return (
+            f"  {C_DIM}♪{C_RESET} {C_PEACH}{msg}{C_RESET}  "
+            f"{C_WHITE}{counter}{C_RESET}{eta_str}  "
+            f"{wave}  {C_DIM}♪{C_RESET}"
+        )
+
+    def _render(self, force: bool = False) -> None:
+        if not self._isatty or self._original_stdout is None:
+            return
+        now = time.time()
+        if not force and self.current < self.total and \
+                now - self._last_render_at < self._MIN_REDRAW_INTERVAL:
+            return
+        self._last_render_at = now
+        line = self._build_line()
+        self._original_stdout.write(f"\r{line}\033[K")
+        self._original_stdout.flush()
+        self._line_active = True
+
+    def update(self, current: int, message: str | None = None) -> None:
+        """Advance the counter (and optionally update the message)."""
+        self.current = current
+        if message is not None:
+            self.message = message
+        self._render()
+
+    def set_message(self, message: str) -> None:
+        """Update the displayed message without changing the counter."""
+        self.message = message
+        self._render()
+
+    def clear(self) -> None:
+        """Erase the progress line. Idempotent. Used by _prompt() before
+        input() so the user's keystrokes appear cleanly."""
+        if self._line_active and self._original_stdout is not None:
+            self._original_stdout.write("\r\033[K")
+            self._original_stdout.flush()
+            self._line_active = False
+
+    def start(self) -> None:
+        """Install the stdout wrapper and draw an initial empty bar."""
+        if self._original_stdout is not None or not self._isatty:
+            return
+        self._original_stdout = sys.stdout
+        sys.stdout = _ProgressStdout(self._original_stdout, self)
+        self._started_at = time.time()
+        self._render(force=True)
+
+    def finish(self) -> None:
+        """Clear the bar and restore the original sys.stdout."""
+        self.clear()
+        if self._original_stdout is not None:
+            sys.stdout = self._original_stdout
+            self._original_stdout = None
+        self._isatty = False
 
     def __enter__(self):
-        if self._loader is not None and self._loader._running:
-            self._was_running = True
-            self._loader.pause()
+        self.start()
         return self
 
     def __exit__(self, *args):
-        if self._was_running and self._loader is not None:
-            self._loader.resume()
+        self.finish()
+
+
+# Module-level pointer to the currently active progress bar. Long-running
+# functions register themselves here so module-level helpers (_progress,
+# _print, _prompt) can find and coordinate with the bar.
+_active_progress: "InlineProgress | None" = None
+
+
+def _start_progress(total: int, message: str) -> InlineProgress:
+    """Create, install, and register an InlineProgress as the active bar.
+    The caller must pair this with _end_progress() (or use it as a context
+    manager) so the stdout wrapper is removed when the operation finishes."""
+    global _active_progress
+    p = InlineProgress(total, message)
+    p.start()
+    _active_progress = p
+    return p
+
+
+def _end_progress(p: InlineProgress) -> None:
+    """Clear the bar, restore stdout, and unregister."""
+    global _active_progress
+    p.finish()
+    if _active_progress is p:
+        _active_progress = None
 
 
 def _progress(current: int, total: int, message: str | None = None) -> None:
-    """Update the active loader's progress counter (no-op when no loader)."""
-    if _active_loader is None:
+    """Update the active progress bar (no-op when none is active).
+    If total changes, re-anchor the ETA clock."""
+    if _active_progress is None:
         return
-    _active_loader.set_progress(current, total)
-    if message is not None:
-        _active_loader.update_message(message)
+    if total != _active_progress.total:
+        _active_progress.total = max(1, total)
+        _active_progress._started_at = time.time()
+    _active_progress.update(current, message)
 
 
-def _loader_paused():
-    """Context manager: pause the active loader for the duration of a block.
-    Safe to use whether or not a loader is currently running."""
-    return _LoaderPause(_active_loader)
+def _print(*args, **kwargs) -> None:
+    """Plain print() — kept as an alias so call sites that explicitly want
+    'print but make sure the progress bar gets out of the way' read clearly.
+    The stdout wrapper installed by InlineProgress already handles the
+    interleaving for any print() call, so this is purely cosmetic."""
+    print(*args, **kwargs)
 
 
 def _prompt(text: str) -> str:
-    """input() replacement that pauses the active loader so the prompt and
-    user keystrokes aren't mangled by the animation thread."""
-    with _loader_paused():
-        try:
-            return input(text)
-        except EOFError:
-            return ""
+    """input() replacement that clears the inline progress bar so the
+    prompt and the user's keystrokes appear cleanly."""
+    if _active_progress is not None:
+        _active_progress.clear()
+    try:
+        return input(text)
+    except EOFError:
+        return ""
 
 
 def _preview_waveform():
@@ -2877,45 +3082,45 @@ def _splash_animation(hold: bool = False):
         return " " * pad_bars + "".join(bars) + C_RESET
 
     try:
-        # ── Phase 1: Waveform bars rise from left to right (~2.4s) ──
-        for frame in range(40):
-            t = frame * 0.2
-            progress = frame / 40
+        # ── Phase 1: Waveform bars rise from left to right (~0.8s) ──
+        for frame in range(20):
+            t = frame * 0.25
+            progress = frame / 20
             line = _render_wave(t, reveal=progress)
             # Single write: move cursor, overwrite in-place (no erase-line flicker)
             raw.write(f"\033[{wave_row};1H{line}\033[K")
             raw.flush()
-            time.sleep(0.06)
+            time.sleep(0.04)
 
-        # ── Phase 2: Logo appears line by line (~0.6s) ──
+        # ── Phase 2: Logo appears line by line (~0.3s) ──
         for i, line in enumerate(logo_lines):
             row = logo_start + i
             if 1 <= row <= h:
                 pad = (w - len(line)) // 2
                 raw.write(f"\033[{row};1H" + " " * max(pad, 0) + f"{C_BLUE}{line}{C_RESET}")
             raw.flush()
-            time.sleep(0.05)
+            time.sleep(0.025)
 
-        # ── Phase 3: Subtitle fades in ──
-        time.sleep(0.25)
+        # ── Phase 3: Subtitle ──
+        time.sleep(0.1)
         subtitle = "clean beats, clean tags"
         if 1 <= sub_row <= h:
             pad = (w - len(subtitle)) // 2
             raw.write(f"\033[{sub_row};1H" + " " * max(pad, 0) + f"{C_DIM}{subtitle}{C_RESET}")
             raw.flush()
 
-        # ── Phase 4: Hold with living waveform (~3.6s) ──
-        for frame in range(40, 100):
-            t = frame * 0.2
+        # ── Phase 4: Hold with living waveform (~0.9s) ──
+        for frame in range(20, 50):
+            t = frame * 0.25
             line = _render_wave(t)
             raw.write(f"\033[{wave_row};1H{line}\033[K")
             raw.flush()
-            time.sleep(0.06)
+            time.sleep(0.03)
 
-        # ── Phase 5: Fade out — waveform shrinks, text dims (~1.2s) ──
-        for frame in range(20):
-            fade = 1.0 - frame / 20
-            t = (100 + frame) * 0.2
+        # ── Phase 5: Fade out (~0.4s) ──
+        for frame in range(10):
+            fade = 1.0 - frame / 10
+            t = (50 + frame) * 0.25
 
             # Redraw waveform with decreasing amplitude
             bars = []
@@ -2931,7 +3136,7 @@ def _splash_animation(hold: bool = False):
                 bars.append(f"{_WAVE_COLORS[level]}{_WAVE_BLOCKS[level]}")
             raw.write(f"\033[{wave_row};1H" + " " * pad_bars + "".join(bars) + C_RESET + "\033[K")
             raw.flush()
-            time.sleep(0.06)
+            time.sleep(0.04)
 
     except KeyboardInterrupt:
         pass
@@ -3214,8 +3419,7 @@ def interactive_menu():
             conv = input(f"  {C_YELLOW}Convert FLACs to 320kbps MP3? (y/N): {C_RESET}").strip().lower() in ("y", "yes")
             dry = ask_dry_run()
             print()
-            with WaveformLoader("Importing..."):
-                process_folder(folder, library_dir, dry_run=dry, use_gemini=gemini, convert_flac=conv)
+            process_folder(folder, library_dir, dry_run=dry, use_gemini=gemini, convert_flac=conv)
             print()
 
         elif choice == "2":
@@ -3225,29 +3429,25 @@ def interactive_menu():
                 continue
             dry = ask_dry_run()
             print()
-            with WaveformLoader("Scanning source folder..."):
-                clean_source_folder(folder, library_dir, dry_run=dry)
+            clean_source_folder(folder, library_dir, dry_run=dry)
             print()
 
         elif choice == "3":
             dry = ask_dry_run()
             print()
-            with WaveformLoader("Fixing covers..."):
-                fix_covers(library_dir, dry_run=dry)
+            fix_covers(library_dir, dry_run=dry)
             print()
 
         elif choice == "4":
             dry = ask_dry_run()
             print()
-            with WaveformLoader("Fixing tags..."):
-                fix_tags(library_dir, dry_run=dry)
+            fix_tags(library_dir, dry_run=dry)
             print()
 
         elif choice == "5":
             dry = ask_dry_run()
             print()
-            with WaveformLoader("Scanning for duplicates..."):
-                remove_duplicates(library_dir, dry_run=dry)
+            remove_duplicates(library_dir, dry_run=dry)
             print()
 
         elif choice == "6":
@@ -3257,23 +3457,20 @@ def interactive_menu():
             dry = ask_dry_run()
             keep = input(f"  {C_YELLOW}Keep original FLAC files after conversion? (y/N): {C_RESET}").strip().lower() in ("y", "yes")
             print()
-            with WaveformLoader("Converting FLACs..."):
-                batch_convert_flac(library_dir, dry_run=dry, keep_original=keep)
+            batch_convert_flac(library_dir, dry_run=dry, keep_original=keep)
             print()
 
         elif choice == "7":
             dry = ask_dry_run()
             print()
-            with WaveformLoader("Renaming files..."):
-                batch_rename_library(library_dir, dry_run=dry)
+            batch_rename_library(library_dir, dry_run=dry)
             print()
 
         elif choice == "8":
             dry = ask_dry_run()
             org = input(f"  {C_YELLOW}Organize files into genre folders? (y/N): {C_RESET}").strip().lower() in ("y", "yes")
             print()
-            with WaveformLoader("Tagging genres..."):
-                ai_genre_tag(library_dir, dry_run=dry, organize=org)
+            ai_genre_tag(library_dir, dry_run=dry, organize=org)
             print()
 
         elif choice == "9":
@@ -3299,8 +3496,7 @@ def interactive_menu():
                     continue
             lossless = input(f"  {C_YELLOW}Also scan lossless files (FLAC/WAV/AIFF) for transcode artifacts? (y/N): {C_RESET}").strip().lower() in ("y", "yes")
             print()
-            with WaveformLoader("Analyzing bitrates..."):
-                analyze_bitrate_quality(library_dir, include_lossless=lossless, target_paths=targets)
+            analyze_bitrate_quality(library_dir, include_lossless=lossless, target_paths=targets)
             print()
 
         elif choice == "u":
