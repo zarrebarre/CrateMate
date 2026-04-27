@@ -996,7 +996,8 @@ def process_folder(folder: str | Path, library_dir: Path, dry_run: bool = False,
 
     stats = ImportStats(total_files=len(files), start_time=time.time())
 
-    for f in files:
+    for i, f in enumerate(files, 1):
+        _progress(i, len(files))
         process_file(f, library_dir, dry_run, gemini_names, source_folder=folder, stats=stats, convert_flac=convert_flac)
 
     print_import_summary(stats)
@@ -1030,7 +1031,8 @@ def fix_covers(library_dir: str | Path, dry_run: bool = False) -> None:
     if dry_run:
         print("DRY RUN — no files will be modified\n")
 
-    for filepath in missing:
+    for i, filepath in enumerate(missing, 1):
+        _progress(i, len(missing))
         artist, title, _mix = parse_library_filename(filepath)
 
         print(f"\n  {filepath.name}")
@@ -1078,7 +1080,8 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
     updated = 0
     skipped = 0
 
-    for filepath in files:
+    for i, filepath in enumerate(files, 1):
+        _progress(i, len(files))
         artist, title_clean, _mix = parse_library_filename(filepath)
 
         print(f"\n  {filepath.name}")
@@ -1222,7 +1225,9 @@ def remove_duplicates(library_dir: str | Path, dry_run: bool = False) -> None:
     removed = 0
     freed = 0
 
-    for (artist, title), group in sorted(dupes.items()):
+    sorted_dupes = sorted(dupes.items())
+    for i, ((artist, title), group) in enumerate(sorted_dupes, 1):
+        _progress(i, len(sorted_dupes))
         # Sort by quality — first entry is the keeper
         group.sort(key=quality_score)
         keeper = group[0]
@@ -1325,14 +1330,15 @@ def clean_source_folder(source_dir: str | Path, library_dir: str | Path,
         print(f"  {C_DIM}DRY RUN — would delete {len(matches)} files, freeing {size_str}{C_RESET}")
         return
 
-    confirm = input(f"  {C_YELLOW}Type YES to delete {len(matches)} source files: {C_RESET}").strip()
+    confirm = _prompt(f"  {C_YELLOW}Type YES to delete {len(matches)} source files: {C_RESET}").strip()
     if confirm != "YES":
         print(f"  {C_DIM}Cancelled.{C_RESET}")
         return
 
     deleted = 0
     freed = 0
-    for sf, _ in matches:
+    for i, (sf, _) in enumerate(matches, 1):
+        _progress(i, len(matches))
         try:
             freed += sf.stat().st_size
             sf.unlink()
@@ -1416,6 +1422,7 @@ def batch_convert_flac(library_dir: str | Path, dry_run: bool = False,
     total_saved = 0
 
     for i, flac_path in enumerate(flac_files, 1):
+        _progress(i, total)
         mp3_path = flac_path.with_suffix(".mp3")
         flac_size = flac_path.stat().st_size
         flac_mb = flac_size / (1024 * 1024)
@@ -1602,6 +1609,7 @@ def ai_genre_tag(library_dir: str | Path, dry_run: bool = False,
     spotify_genre_cache: dict[str, str | None] = {}  # artist name → genre
 
     for i, (artist, title, mix) in enumerate(tracks, 1):
+        _progress(i, total)
         hint_parts: list[str] = []
 
         # Spotify — cache by artist (genres are artist-level)
@@ -1657,7 +1665,8 @@ def ai_genre_tag(library_dir: str | Path, dry_run: bool = False,
     else:
         print(f"\n  Writing genre tags...")
         tagged = 0
-        for filepath, genre in zip(files, genres):
+        for i, (filepath, genre) in enumerate(zip(files, genres), 1):
+            _progress(i, len(files))
             try:
                 mf = mediafile.MediaFile(str(filepath))
                 if mf.genre != genre:
@@ -1680,7 +1689,11 @@ def ai_genre_tag(library_dir: str | Path, dry_run: bool = False,
     moved = 0
     skipped = 0
     undo_actions: list[dict] = []
-    for filepath, genre in zip(files, genres):
+    # Reset progress counter so the organize phase has its own clock/ETA
+    if _active_loader is not None:
+        _active_loader.reset_progress()
+    for i, (filepath, genre) in enumerate(zip(files, genres), 1):
+        _progress(i, len(files))
         genre_dir = library_dir / safe_filename(genre)
         dest = genre_dir / filepath.name
 
@@ -2052,6 +2065,7 @@ def analyze_bitrate_quality(library_dir: str | Path,
     start_time = time.time()
 
     for i, filepath in enumerate(files, 1):
+        _progress(i, total)
         name = filepath.name
         suffix = filepath.suffix.lower()
         is_lossless = suffix in LOSSLESS_EXTENSIONS
@@ -2220,14 +2234,15 @@ def undo_last_operation() -> None:
         print(f"    {C_DIM}... and {len(actions) - 10} more{C_RESET}")
     print()
 
-    confirm = input(f"  {C_YELLOW}Type YES to undo: {C_RESET}").strip()
+    confirm = _prompt(f"  {C_YELLOW}Type YES to undo: {C_RESET}").strip()
     if confirm != "YES":
         print(f"  {C_DIM}Cancelled.{C_RESET}")
         return
 
     undone = 0
     errors = 0
-    for a in actions:
+    for i, a in enumerate(actions, 1):
+        _progress(i, len(actions))
         try:
             src = Path(a["src"])
             dest = Path(a["dest"])
@@ -2338,7 +2353,7 @@ def batch_rename_library(library_dir: str | Path, dry_run: bool = False) -> None
         print(f"  {C_DIM}DRY RUN — no files will be renamed{C_RESET}")
         return
 
-    confirm = input(f"  {C_YELLOW}Type YES to rename {len(renames)} files: {C_RESET}").strip()
+    confirm = _prompt(f"  {C_YELLOW}Type YES to rename {len(renames)} files: {C_RESET}").strip()
     if confirm != "YES":
         print(f"  {C_DIM}Cancelled.{C_RESET}")
         return
@@ -2346,7 +2361,8 @@ def batch_rename_library(library_dir: str | Path, dry_run: bool = False) -> None
     # Execute renames and build undo log
     undo_actions: list[dict] = []
     renamed = 0
-    for old_path, new_path in renames:
+    for i, (old_path, new_path) in enumerate(renames, 1):
+        _progress(i, len(renames))
         try:
             # Also update tags to match new filename
             artist, title, mix = gemini_names[str(old_path)]
@@ -2394,7 +2410,7 @@ C_GRAY = "\033[38;5;244m"
 C_BLUE = "\033[38;5;69m"
 C_BLUE_LT = "\033[38;5;111m"
 
-VERSION = "v1.4.0"
+VERSION = "v1.4.1"
 
 # ── SPLASH LOGO ────────────────────────────────────────────────────────────
 
@@ -2508,6 +2524,47 @@ class WaveformLoader:
         self._lock = threading.Lock()
         self._frame = 0
         self._original_stdout = None
+        # Progress tracking — set via set_progress() so a numeric counter and
+        # ETA can be rendered alongside the animated waveform.
+        self._current = 0
+        self._total = 0
+        self._progress_started_at = 0.0
+
+    def _format_eta(self) -> str:
+        """Estimate remaining time based on elapsed/current ratio."""
+        if self._total <= 0 or self._current <= 0:
+            return ""
+        elapsed = time.time() - self._progress_started_at
+        if elapsed < 0.5:
+            return ""
+        per_item = elapsed / self._current
+        remaining = max(0, self._total - self._current) * per_item
+        if remaining < 1:
+            return "almost done"
+        if remaining < 60:
+            return f"~{int(remaining)}s left"
+        if remaining < 3600:
+            mins = int(remaining // 60)
+            secs = int(remaining % 60)
+            return f"~{mins}m {secs:02d}s left"
+        hrs = int(remaining // 3600)
+        mins = int((remaining % 3600) // 60)
+        return f"~{hrs}h {mins:02d}m left"
+
+    def _progress_str(self) -> tuple[str, int]:
+        """Build the progress counter chunk and its visible width.
+        Returns ("", 0) when no total has been set."""
+        if self._total <= 0:
+            return "", 0
+        counter = f"{self._current}/{self._total}"
+        eta = self._format_eta()
+        if eta:
+            visible = f"  {counter} · {eta}"
+            colored = f"  {C_WHITE}{counter}{C_RESET} {C_DIM}· {eta}{C_RESET}"
+        else:
+            visible = f"  {counter}"
+            colored = f"  {C_WHITE}{counter}{C_RESET}"
+        return colored, len(visible)
 
     def _render_wave(self) -> str:
         """Render one frame of the waveform animation.
@@ -2539,9 +2596,11 @@ class WaveformLoader:
 
         wave_str = "".join(wave_chars) + C_RESET
 
-        # Build the full status line: "  ♪ message  ▁▂▃▄▅▆▇▆▅▄▃▂▁  ♪"
-        prefix = f"  {C_DIM}♪{C_RESET} {C_PEACH}{self._message}{C_RESET}  "
-        prefix_vis = len(f"  ♪ {self._message}  ")
+        # Build the status line:
+        #   "  ♪ message  47/200 · ~12s left  ▁▂▃▄▅▆▇..  ♪"
+        progress_colored, progress_vis = self._progress_str()
+        prefix = f"  {C_DIM}♪{C_RESET} {C_PEACH}{self._message}{C_RESET}{progress_colored}  "
+        prefix_vis = len(f"  ♪ {self._message}") + progress_vis + 2
         wave_vis = self._bars
         suffix = f"  {C_DIM}♪{C_RESET}"
         suffix_vis = 3
@@ -2550,7 +2609,11 @@ class WaveformLoader:
         if total_vis < w:
             pad = " " * (w - total_vis)
             return f"{prefix}{wave_str}{pad}{suffix}"
-        return f"{prefix}{wave_str}{suffix}"
+        # Terminal is too narrow — drop the trailing waveform symbol
+        if prefix_vis + wave_vis < w:
+            return f"{prefix}{wave_str}"
+        # Still too narrow — drop the wave entirely so the counter stays visible
+        return prefix.rstrip()
 
     def _animate(self):
         """Background thread: redraw the waveform at ~15 fps."""
@@ -2567,6 +2630,7 @@ class WaveformLoader:
 
     def start(self):
         """Start the waveform animation."""
+        global _active_loader
         if self._running:
             return
         self._running = True
@@ -2590,12 +2654,17 @@ class WaveformLoader:
         # Replace sys.stdout with the serialized wrapper
         sys.stdout = _WaveStdout(raw, self._lock, self)
 
+        # Register as the active loader so module-level progress/prompt helpers
+        # can find us. Only one loader is expected to be active at a time.
+        _active_loader = self
+
         # Start the animation thread
         self._thread = threading.Thread(target=self._animate, daemon=True)
         self._thread.start()
 
     def stop(self):
         """Stop the waveform animation and restore the terminal."""
+        global _active_loader
         if not self._running:
             return
         self._running = False
@@ -2616,11 +2685,44 @@ class WaveformLoader:
             raw.flush()
 
         self._original_stdout = None
+        if _active_loader is self:
+            _active_loader = None
 
     def update_message(self, message: str):
         """Update the status message shown alongside the waveform."""
         with self._lock:
             self._message = message
+
+    def set_progress(self, current: int, total: int) -> None:
+        """Update the progress counter rendered alongside the waveform.
+        First call (re)starts the ETA clock so the estimate reflects the
+        active operation rather than the time the loader was created."""
+        with self._lock:
+            if self._total <= 0 or total != self._total:
+                self._progress_started_at = time.time()
+            self._current = current
+            self._total = total
+
+    def reset_progress(self) -> None:
+        """Clear the progress counter (returns the loader to indeterminate mode)."""
+        with self._lock:
+            self._current = 0
+            self._total = 0
+            self._progress_started_at = 0.0
+
+    def pause(self):
+        """Temporarily stop the animation so input() and other terminal-
+        sensitive operations can run cleanly. Use with resume() or via the
+        paused() context manager."""
+        self.stop()
+
+    def resume(self):
+        """Restart the animation after pause(). Preserves message and progress."""
+        self.start()
+
+    def paused(self):
+        """Context manager that pauses the loader on enter and resumes on exit."""
+        return _LoaderPause(self)
 
     def __enter__(self):
         self.start()
@@ -2628,6 +2730,61 @@ class WaveformLoader:
 
     def __exit__(self, *args):
         self.stop()
+
+
+# ── ACTIVE-LOADER HELPERS ───────────────────────────────────────────────────
+#
+# Long-running operations are wrapped in `with WaveformLoader(...)` from the
+# interactive menu, but the actual functions are the ones that know their
+# progress and need to ask the user questions. These module-level helpers let
+# any function update the visible progress counter and pause the animation
+# around input() prompts, without having to thread a loader reference through
+# every call site.
+
+_active_loader: "WaveformLoader | None" = None
+
+
+class _LoaderPause:
+    """Context manager that pauses a loader on enter and resumes on exit."""
+
+    def __init__(self, loader: "WaveformLoader | None"):
+        self._loader = loader
+        self._was_running = False
+
+    def __enter__(self):
+        if self._loader is not None and self._loader._running:
+            self._was_running = True
+            self._loader.pause()
+        return self
+
+    def __exit__(self, *args):
+        if self._was_running and self._loader is not None:
+            self._loader.resume()
+
+
+def _progress(current: int, total: int, message: str | None = None) -> None:
+    """Update the active loader's progress counter (no-op when no loader)."""
+    if _active_loader is None:
+        return
+    _active_loader.set_progress(current, total)
+    if message is not None:
+        _active_loader.update_message(message)
+
+
+def _loader_paused():
+    """Context manager: pause the active loader for the duration of a block.
+    Safe to use whether or not a loader is currently running."""
+    return _LoaderPause(_active_loader)
+
+
+def _prompt(text: str) -> str:
+    """input() replacement that pauses the active loader so the prompt and
+    user keystrokes aren't mangled by the animation thread."""
+    with _loader_paused():
+        try:
+            return input(text)
+        except EOFError:
+            return ""
 
 
 def _preview_waveform():

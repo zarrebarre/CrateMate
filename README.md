@@ -84,6 +84,9 @@ Spectral analysis to identify files that claim to be high-quality but were trans
 ### Undo
 Reverses the last destructive operation (batch rename, genre organize). Undo log stored at `~/.config/cratemate/undo_log.json`.
 
+### Live progress
+Long-running operations show a live counter and ETA next to the animated waveform (e.g. `47/200 · ~12s left`). Confirmation prompts pause the animation while you type so YES/N input is never mangled by the redraw thread.
+
 ## Interactive menu
 
 ```
