@@ -438,64 +438,80 @@ def itunes_search(artist: str, title: str) -> dict | None:
     Returns a dict with keys: art_url, genre, album_name, album_artist, year,
     canonical_artist, canonical_title, confidence (0–1).
     Returns None if no result meets the minimum confidence threshold.
+
+    Retry strategy handles common filename patterns that confuse the query:
+    - Trailing disambiguation suffixes like "(NZ)", "(UK)" stripped from artist.
+    - Three-part filenames ("Artist - Album - Title") where parse_library_filename
+      produces "Album - Title" as the title: we retry with just the last segment
+      after the final " - ".
     """
     import difflib
 
-    # Strip trailing disambiguation suffixes like "(NZ)", "(UK)", "(US)" that
-    # appear in filenames but not in official release metadata.
-    artist_search = re.sub(r"\s*\([^)]+\)\s*$", "", artist).strip() if artist else artist
-    query = f"{artist_search} {title}" if artist_search else title
-    try:
-        resp = requests.get(
-            "https://itunes.apple.com/search",
-            params={"term": query, "media": "music", "entity": "song", "limit": 5},
-            timeout=8,
-        )
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-    except Exception:
-        return None
-
-    if not results:
-        return None
-
-    # Compare against our parsed title with mix/feat stripped so
-    # "Track (Extended Mix)" still matches an iTunes "Track" entry
     def _clean(s: str) -> str:
         s = _DEDUP_MIX.sub("", s)
         s = _DEDUP_FEAT.sub("", s)
         return re.sub(r"\s+", " ", s).strip().lower()
 
-    parsed_clean = _clean(title)
+    def _query_itunes(artist_q: str, title_q: str):
+        try:
+            resp = requests.get(
+                "https://itunes.apple.com/search",
+                params={"term": f"{artist_q} {title_q}".strip(),
+                        "media": "music", "entity": "song", "limit": 5},
+                timeout=8,
+            )
+            resp.raise_for_status()
+            return resp.json().get("results", [])
+        except Exception:
+            return []
 
-    best, best_score = None, 0.0
-    for r in results:
-        itunes_clean = _clean(r.get("trackName", ""))
-        score = difflib.SequenceMatcher(None, parsed_clean, itunes_clean).ratio()
-        if score > best_score:
-            best_score = score
-            best = r
+    def _best_match(results: list, title_q: str):
+        parsed_clean = _clean(title_q)
+        best, best_score = None, 0.0
+        for r in results:
+            score = difflib.SequenceMatcher(
+                None, parsed_clean, _clean(r.get("trackName", ""))
+            ).ratio()
+            if score > best_score:
+                best_score = score
+                best = r
+        return best, best_score
 
-    if best_score < 0.6:
-        return None
+    def _build_result(best: dict, score: float) -> dict:
+        art_url = best.get("artworkUrl100", "")
+        if art_url:
+            art_url = re.sub(r"\d+x\d+bb", "600x600bb", art_url)
+        return {
+            "art_url": art_url or None,
+            "genre": best.get("primaryGenreName", ""),
+            "album_name": best.get("collectionName", ""),
+            "album_artist": best.get("artistName", ""),
+            "year": (best.get("releaseDate") or "")[:4],
+            "canonical_artist": best.get("artistName", ""),
+            "canonical_title": best.get("trackName", ""),
+            "confidence": score,
+        }
 
-    # Build high-res artwork URL (swap the size token in the mzstatic CDN path)
-    art_url = best.get("artworkUrl100", "")
-    if art_url:
-        art_url = re.sub(r"\d+x\d+bb", "600x600bb", art_url)
+    # Strip trailing disambiguation suffixes like "(NZ)", "(UK)" from artist
+    artist_search = re.sub(r"\s*\([^)]+\)\s*$", "", artist).strip() if artist else ""
 
-    year = (best.get("releaseDate") or "")[:4]
+    # ── Attempt 1: full artist + full title ──────────────────────────────────
+    results = _query_itunes(artist_search, title)
+    best, score = _best_match(results, title)
+    if score >= 0.6:
+        return _build_result(best, score)
 
-    return {
-        "art_url": art_url or None,
-        "genre": best.get("primaryGenreName", ""),
-        "album_name": best.get("collectionName", ""),
-        "album_artist": best.get("artistName", ""),
-        "year": year,
-        "canonical_artist": best.get("artistName", ""),
-        "canonical_title": best.get("trackName", ""),
-        "confidence": best_score,
-    }
+    # ── Attempt 2: three-part filename fallback ──────────────────────────────
+    # If title contains " - " it may be "Album - RealTitle" from a filename like
+    # "Artist - Album - Title". Retry using only the segment after the last " - ".
+    if " - " in title:
+        title_last = title.rsplit(" - ", 1)[-1].strip()
+        results2 = _query_itunes(artist_search, title_last)
+        best2, score2 = _best_match(results2, title_last)
+        if score2 >= 0.6:
+            return _build_result(best2, score2)
+
+    return None
 
 
 # Broad iTunes genre labels that aren't useful for a DJ library — if we get
