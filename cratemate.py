@@ -111,6 +111,16 @@ FORMAT_RANK = {
     ".ogg": 4, ".opus": 4,
 }
 
+# Duplicate-detection patterns — strip these before comparing
+_DEDUP_MIX = re.compile(
+    r"\b(original\s+mix|extended(\s+mix)?|club\s+mix|radio\s+(mix|edit)|"
+    r"vip|dub|acapella|instrumental|edit|remaster(ed)?)\b",
+    re.IGNORECASE,
+)
+_DEDUP_FEAT = re.compile(r"\b(feat\.?|ft\.?|featuring)\s+.*$", re.IGNORECASE)
+_DEDUP_SEP = re.compile(r"\s*(?:&|\band\b|\bvs\.?\b|\bx\b|,|\+)\s*", re.IGNORECASE)
+_DEDUP_NORM = re.compile(r"[^\w\s]")
+
 # ── RATE-LIMITED REQUESTS ───────────────────────────────────────────────────
 
 _last_spotify_call = 0.0
@@ -418,6 +428,77 @@ def discogs_search_genre(artist: str, title: str) -> str:
         if combined:
             return ", ".join(combined)
     return ""
+
+
+# ── ITUNES SEARCH ──────────────────────────────────────────────────────────
+
+def itunes_search(artist: str, title: str) -> dict | None:
+    """Search the iTunes catalog for a track. No API key required.
+
+    Returns a dict with keys: art_url, genre, album_name, album_artist, year,
+    canonical_artist, canonical_title, confidence (0–1).
+    Returns None if no result meets the minimum confidence threshold.
+    """
+    import difflib
+
+    query = f"{artist} {title}" if artist else title
+    try:
+        resp = requests.get(
+            "https://itunes.apple.com/search",
+            params={"term": query, "media": "music", "entity": "song", "limit": 5},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+    except Exception:
+        return None
+
+    if not results:
+        return None
+
+    # Compare against our parsed title with mix/feat stripped so
+    # "Track (Extended Mix)" still matches an iTunes "Track" entry
+    def _clean(s: str) -> str:
+        s = _DEDUP_MIX.sub("", s)
+        s = _DEDUP_FEAT.sub("", s)
+        return re.sub(r"\s+", " ", s).strip().lower()
+
+    parsed_clean = _clean(title)
+
+    best, best_score = None, 0.0
+    for r in results:
+        itunes_clean = _clean(r.get("trackName", ""))
+        score = difflib.SequenceMatcher(None, parsed_clean, itunes_clean).ratio()
+        if score > best_score:
+            best_score = score
+            best = r
+
+    if best_score < 0.6:
+        return None
+
+    # Build high-res artwork URL (swap the size token in the mzstatic CDN path)
+    art_url = best.get("artworkUrl100", "")
+    if art_url:
+        art_url = re.sub(r"\d+x\d+bb", "600x600bb", art_url)
+
+    year = (best.get("releaseDate") or "")[:4]
+
+    return {
+        "art_url": art_url or None,
+        "genre": best.get("primaryGenreName", ""),
+        "album_name": best.get("collectionName", ""),
+        "album_artist": best.get("artistName", ""),
+        "year": year,
+        "canonical_artist": best.get("artistName", ""),
+        "canonical_title": best.get("trackName", ""),
+        "confidence": best_score,
+    }
+
+
+# Broad iTunes genre labels that aren't useful for a DJ library — if we get
+# one of these, try Spotify afterwards for a more specific override.
+_ITUNES_BROAD_GENRES = {"dance", "electronic", "music", "pop", "alternative",
+                        "rock", "r&b/soul", "hip-hop/rap", "singer/songwriter"}
 
 
 # ── GEMINI AI NAME FIXING ──────────────────────────────────────────────────
@@ -734,10 +815,16 @@ def parse_library_filename(filepath: str | Path) -> tuple[str, str, str]:
 
 
 def search_cover_art(artist: str, title: str) -> tuple[bytes | None, str | None]:
-    """Search Spotify then Discogs for cover art.
+    """Search iTunes → Spotify → Discogs for cover art.
 
     Returns (art_bytes, source_name) or (None, None).
     """
+    itunes = itunes_search(artist, title)
+    if itunes and itunes.get("art_url"):
+        art_data = fetch_art(itunes["art_url"])
+        if art_data:
+            return art_data, "iTunes"
+
     search_artist = artist if artist else title
     spotify = spotify_search(search_artist, title)
     if spotify and spotify.get("art_url"):
@@ -764,6 +851,7 @@ class ImportStats:
     skipped_existing: int = 0
     skipped_parse_fail: int = 0
     skipped_other: int = 0
+    cover_itunes: int = 0
     cover_spotify: int = 0
     cover_discogs: int = 0
     cover_none: int = 0
@@ -791,7 +879,8 @@ def print_import_summary(stats: ImportStats) -> None:
         print(f"  Errors:             {stats.errors}")
 
     print()
-    print(f"  Cover art:  Spotify {stats.cover_spotify}  |  "
+    print(f"  Cover art:  iTunes {stats.cover_itunes}  |  "
+          f"Spotify {stats.cover_spotify}  |  "
           f"Discogs {stats.cover_discogs}  |  None {stats.cover_none}")
 
     if stats.genres:
@@ -824,29 +913,25 @@ def process_file(filepath: str | Path, library_dir: Path, dry_run: bool = False,
 
     print(f"\n  {filepath.name}")
 
-    # 1. Try existing tags first as a reference
+    # ── 1. Parse filename (Gemini or regex) ─────────────────────────────────
     existing_artist = ""
-    existing_title = ""
     try:
         mf_read = mediafile.MediaFile(str(filepath))
         existing_artist = (mf_read.artist or "").strip()
-        existing_title = (mf_read.title or "").strip()
-    except Exception as e:
-        print(f"    Warning: couldn't read existing tags: {e}")
+    except Exception:
+        pass
 
-    # 2. Parse filename — prefer Gemini result if available
     if gemini_names and str(filepath) in gemini_names:
         artist, title, mix = gemini_names[str(filepath)]
         print(f"    Gemini:  {artist} — {title}" + (f" ({mix})" if mix else ""))
     else:
         artist, title, mix = parse_filename(filepath)
 
-    # If filename parse found no artist, try the existing tag
     if not artist and existing_artist:
         artist = existing_artist
         print(f"    Artist from tags: {artist}")
 
-    print(f"    Parsed: {artist} — {title}" + (f" ({mix})" if mix else ""))
+    print(f"    Parsed:  {artist} — {title}" + (f" ({mix})" if mix else ""))
 
     if not title:
         print("    Skipping: couldn't parse title")
@@ -854,34 +939,64 @@ def process_file(filepath: str | Path, library_dir: Path, dry_run: bool = False,
             stats.skipped_parse_fail += 1
         return
 
-    # 3. Search for cover art + genre (Spotify first, Discogs fallback)
+    # ── 2. iTunes lookup (primary) ──────────────────────────────────────────
     art_data = None
     genre = UNSORTED_GENRE
-    search_artist = artist if artist else title
-    spotify = spotify_search(search_artist, title)
-    if spotify:
-        if spotify["art_url"]:
-            art_data = fetch_art(spotify["art_url"])
-            if art_data:
-                print(f"    Cover art: Spotify")
-                if stats:
-                    stats.cover_spotify += 1
-        if spotify["genre"]:
-            genre = spotify["genre"]
-            print(f"    Genre: {genre}")
-        # Fill in artist from Spotify if we don't have one and the title matches
-        if not artist and spotify.get("spotify_artist") and spotify.get("spotify_title"):
-            sp_title = spotify["spotify_title"].lower()
-            if title.lower() in sp_title or sp_title in title.lower():
-                artist = spotify["spotify_artist"]
-                print(f"    Artist from Spotify: {artist}")
-            else:
-                print(f"    Spotify match title mismatch: \"{spotify['spotify_title']}\" — not using artist")
-    else:
-        print("    Spotify: no match")
+    album_name = ""
+    album_artist = ""
+    year = None
 
-    # Discogs fallback for art if Spotify didn't have it
+    itunes = itunes_search(artist, title)
+    if itunes:
+        conf = itunes["confidence"]
+        print(f"    iTunes:  {itunes['canonical_artist']} — {itunes['canonical_title']}"
+              f"  {C_DIM}(conf {conf:.0%}){C_RESET}")
+
+        # Art — always use if available
+        if itunes.get("art_url"):
+            art_data = fetch_art(itunes["art_url"])
+            if art_data:
+                print(f"    Cover art: iTunes")
+                if stats:
+                    stats.cover_itunes += 1
+
+        # Supplementary tags — available at any confidence ≥ 0.6
+        if itunes.get("album_name"):
+            album_name = itunes["album_name"]
+        if itunes.get("album_artist"):
+            album_artist = itunes["album_artist"]
+        if itunes.get("year"):
+            year = itunes["year"]
+        if itunes.get("genre"):
+            genre = itunes["genre"]
+            print(f"    Genre:   {genre}")
+
+        # Canonical artist — only when confident enough to trust the match
+        if conf >= 0.8 and itunes.get("canonical_artist"):
+            artist = itunes["canonical_artist"]
+            print(f"    Artist → {artist}  {C_DIM}(iTunes canonical){C_RESET}")
+    else:
+        print(f"    iTunes:  no match")
+
+    # ── 3. Spotify — genre override when iTunes genre is too broad ──────────
+    if genre.lower() in _ITUNES_BROAD_GENRES or not itunes:
+        search_artist = artist if artist else title
+        spotify = spotify_search(search_artist, title)
+        if spotify:
+            if spotify.get("genre"):
+                genre = spotify["genre"]
+                print(f"    Genre → {genre}  {C_DIM}(Spotify){C_RESET}")
+            # Spotify art fallback when iTunes missed
+            if not art_data and spotify.get("art_url"):
+                art_data = fetch_art(spotify["art_url"])
+                if art_data:
+                    print(f"    Cover art: Spotify")
+                    if stats:
+                        stats.cover_spotify += 1
+
+    # ── 4. Discogs — art-only last resort ───────────────────────────────────
     if not art_data:
+        search_artist = artist if artist else title
         discogs_url = discogs_search_art(search_artist, title)
         if discogs_url:
             art_data = fetch_art(discogs_url)
@@ -895,7 +1010,7 @@ def process_file(filepath: str | Path, library_dir: Path, dry_run: bool = False,
         if stats:
             stats.cover_none += 1
 
-    # 3. Build destination path — preserve subfolder structure from source
+    # ── 5. Build destination path ────────────────────────────────────────────
     safe_artist = safe_filename(artist) if artist else "Unknown Artist"
     safe_title = safe_filename(title)
     if mix:
@@ -903,8 +1018,6 @@ def process_file(filepath: str | Path, library_dir: Path, dry_run: bool = False,
     else:
         dest_name = f"{safe_artist} - {safe_title}{ext}"
 
-    # Preserve subfolder structure: if file was in source/SubFolder/track.mp3
-    # it goes to library/SubFolder/Artist - Title.mp3
     if source_folder:
         rel_parent = filepath.parent.relative_to(source_folder)
         dest_dir = library_dir / rel_parent
@@ -925,7 +1038,7 @@ def process_file(filepath: str | Path, library_dir: Path, dry_run: bool = False,
             stats.genres[genre] = stats.genres.get(genre, 0) + 1
         return
 
-    # 4. Copy file (never touch original)
+    # ── 6. Copy file (never touch original) ─────────────────────────────────
     dest_dir.mkdir(parents=True, exist_ok=True)
     if dest_path.exists():
         print("    Already exists — skipping")
@@ -938,7 +1051,7 @@ def process_file(filepath: str | Path, library_dir: Path, dry_run: bool = False,
         stats.total_bytes_copied += filepath.stat().st_size
         stats.genres[genre] = stats.genres.get(genre, 0) + 1
 
-    # 4b. Convert FLAC to MP3 in-place if requested
+    # 6b. Convert FLAC to MP3 in-place if requested
     if convert_flac and ext == ".flac":
         mp3_dest = dest_path.with_suffix(".mp3")
         if mp3_dest.exists():
@@ -954,16 +1067,25 @@ def process_file(filepath: str | Path, library_dir: Path, dry_run: bool = False,
             else:
                 print(f"  {C_RED}failed — keeping FLAC{C_RESET}")
 
-    # 5. Write tags to the COPY — always strip old art, write fresh
+    # ── 7. Write all tags to the copy ───────────────────────────────────────
+    # Title and mix always come from our filename parser — never overwritten by
+    # the API — so extended/radio/remix info is always preserved correctly.
     try:
         mf = mediafile.MediaFile(str(dest_path))
         if artist:
             mf.artist = artist
         mf.title = title + (f" ({mix})" if mix else "")
         mf.genre = genre
-        # Always remove existing art (promo images, low-res junk, etc.)
-        mf.art = None
-        # Then embed the fresh art we found
+        if album_name:
+            mf.album = album_name
+        if album_artist:
+            mf.albumartist = album_artist
+        if year:
+            try:
+                mf.year = int(year)
+            except (ValueError, TypeError):
+                pass
+        mf.art = None  # strip promo/junk art
         if art_data:
             mf.art = art_data
         mf.save()
@@ -1069,7 +1191,7 @@ def fix_covers(library_dir: str | Path, dry_run: bool = False) -> None:
 
 
 def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
-    """Update album/year/genre tags from Spotify without changing title/artist/duration.
+    """Update supplementary tags using iTunes (primary) then Spotify (genre fallback).
 
     Safe to update: album, album artist, year, genre, cover art
     Never touches: title, artist, duration, BPM, key, track number
@@ -1095,17 +1217,6 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
 
         print(f"\n  {filepath.name}")
 
-        # Search Spotify — use clean title (without mix) for better results
-        search_artist = artist if artist else title_clean
-        spotify = spotify_search(search_artist, title_clean)
-
-        if not spotify:
-            print(f"    Spotify: no match — skipping")
-            skipped += 1
-            progress.update(i)
-            continue
-
-        # Read current tags
         try:
             mf = mediafile.MediaFile(str(filepath))
         except Exception as e:
@@ -1114,38 +1225,74 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
             progress.update(i)
             continue
 
-        # Determine what needs updating
+        # Accumulate candidate values from each source
+        new_album = new_albumartist = new_genre = new_art_url = new_year = None
+
+        # ── iTunes (primary) ────────────────────────────────────────────────
+        itunes = itunes_search(artist, title_clean)
+        if itunes:
+            if itunes.get("album_name"):
+                new_album = itunes["album_name"]
+            if itunes.get("album_artist"):
+                new_albumartist = itunes["album_artist"]
+            if itunes.get("year"):
+                new_year = itunes["year"]
+            if itunes.get("genre"):
+                new_genre = itunes["genre"]
+            if itunes.get("art_url"):
+                new_art_url = itunes["art_url"]
+
+        # ── Spotify (genre override when iTunes genre too broad) ─────────────
+        if not itunes or not new_genre or new_genre.lower() in _ITUNES_BROAD_GENRES:
+            search_artist = artist if artist else title_clean
+            spotify = spotify_search(search_artist, title_clean)
+            if spotify:
+                if spotify.get("genre"):
+                    new_genre = spotify["genre"]
+                # Spotify art fallback
+                if not new_art_url and spotify.get("art_url"):
+                    new_art_url = spotify["art_url"]
+                # Fill remaining fields Spotify has that iTunes didn't
+                if not new_album and spotify.get("album_name"):
+                    new_album = spotify["album_name"]
+                if not new_albumartist and spotify.get("album_artist"):
+                    new_albumartist = spotify["album_artist"]
+                if not new_year and spotify.get("year") and spotify["year"] != "0000":
+                    new_year = spotify["year"]
+
+        if not any([new_album, new_albumartist, new_genre, new_art_url, new_year]):
+            print(f"    No match found — skipping")
+            skipped += 1
+            progress.update(i)
+            continue
+
+        # Determine what actually needs changing
         changes = []
 
-        if spotify.get("album_name") and mf.album != spotify["album_name"]:
-            changes.append(("album", mf.album, spotify["album_name"]))
+        if new_album and mf.album != new_album:
+            changes.append(("album", mf.album, new_album))
 
-        if spotify.get("album_artist") and mf.albumartist != spotify["album_artist"]:
-            changes.append(("album artist", mf.albumartist, spotify["album_artist"]))
+        if new_albumartist and mf.albumartist != new_albumartist:
+            changes.append(("album artist", mf.albumartist, new_albumartist))
 
-        if spotify.get("year") and spotify["year"] != "0000":
+        if new_year:
             try:
-                year = int(spotify["year"])
-                if mf.year != year:
-                    changes.append(("year", mf.year, year))
+                year_int = int(new_year)
+                if mf.year != year_int:
+                    changes.append(("year", mf.year, year_int))
             except (ValueError, TypeError):
                 pass
 
-        if spotify.get("genre") and mf.genre != spotify["genre"]:
-            changes.append(("genre", mf.genre, spotify["genre"]))
+        if new_genre and mf.genre != new_genre:
+            changes.append(("genre", mf.genre, new_genre))
 
-        # Check if art is missing or suspiciously small (likely an ad/placeholder)
         art_data = None
-        if spotify.get("art_url"):
-            needs_art = not mf.art
-            if mf.art and len(mf.art) < ART_JUNK_THRESHOLD:
-                needs_art = True
-                changes.append(("art", f"replacing junk ({len(mf.art)} bytes)", "Spotify art"))
-            elif needs_art:
-                changes.append(("art", "missing", "Spotify art"))
-
+        if new_art_url:
+            needs_art = not mf.art or (mf.art and len(mf.art) < ART_JUNK_THRESHOLD)
             if needs_art:
-                art_data = fetch_art(spotify["art_url"])
+                label = f"replacing junk ({len(mf.art)} bytes)" if mf.art else "missing"
+                changes.append(("art", label, "fetching"))
+                art_data = fetch_art(new_art_url)
 
         if not changes:
             print(f"    Tags already good")
@@ -1160,19 +1307,18 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
             progress.update(i)
             continue
 
-        # Write only the safe tags
         try:
-            if spotify.get("album_name"):
-                mf.album = spotify["album_name"]
-            if spotify.get("album_artist"):
-                mf.albumartist = spotify["album_artist"]
-            if spotify.get("year") and spotify["year"] != "0000":
+            if new_album:
+                mf.album = new_album
+            if new_albumartist:
+                mf.albumartist = new_albumartist
+            if new_year:
                 try:
-                    mf.year = int(spotify["year"])
+                    mf.year = int(new_year)
                 except (ValueError, TypeError):
                     pass
-            if spotify.get("genre"):
-                mf.genre = spotify["genre"]
+            if new_genre:
+                mf.genre = new_genre
             if art_data:
                 mf.art = art_data
             mf.save()
@@ -1190,10 +1336,17 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
 def remove_duplicates(library_dir: str | Path, dry_run: bool = False) -> None:
     """Find and remove duplicate tracks, keeping the highest-quality version.
 
-    Duplicates are identified by normalised artist + title (case-insensitive,
-    punctuation-stripped). When duplicates exist, the best format/size wins:
-    FLAC > AIFF/AIF/WAV > MP3/M4A > OGG/OPUS, then largest file as tiebreaker.
+    Duplicates are found in two passes:
+    1. Canonical key match — strips mix/feat annotations, normalises collab
+       separators, then groups files with identical (artist, title) keys.
+    2. Fuzzy second pass — clusters remaining files with SequenceMatcher
+       similarity ≥ 0.92 on their canonical (artist + title) string.
+
+    Tiebreaker: FLAC > AIFF/WAV > M4A > MP3 > OGG, then largest file.
+    Genre-subfolder files are preferred over root-level files.
     """
+    import difflib
+
     library_dir = Path(library_dir)
     files = find_audio_files(library_dir)
 
@@ -1201,64 +1354,114 @@ def remove_duplicates(library_dir: str | Path, dry_run: bool = False) -> None:
         print(f"No music files found in {library_dir}")
         return
 
-    def normalise_key(filepath):
-        """Extract a normalised (artist, title) key from a library filename."""
-        artist, title, _mix = parse_library_filename(filepath)
-        # Normalise: lowercase, strip punctuation, collapse whitespace
-        def norm(s):
-            s = s.lower()
-            s = re.sub(r"[^\w\s]", "", s)
-            s = re.sub(r"\s+", " ", s).strip()
-            return s
-        return (norm(artist), norm(title))
+    def _norm(s: str) -> str:
+        s = _DEDUP_NORM.sub("", s.lower())
+        return re.sub(r"\s+", " ", s).strip()
 
-    def quality_score(filepath):
-        """Lower score = higher quality. Used to pick the keeper."""
+    def canonical_key(filepath: Path) -> tuple[str, str]:
+        artist, title, _mix = parse_library_filename(filepath)
+        title = _DEDUP_MIX.sub("", title)
+        title = _DEDUP_FEAT.sub("", title)
+        artist_parts = sorted(_DEDUP_SEP.split(artist))
+        return (_norm(" ".join(artist_parts)), _norm(title))
+
+    def quality_score(filepath: Path):
+        """Lower = better. Genre-subfolder files beat root-level files."""
         fmt = FORMAT_RANK.get(filepath.suffix.lower(), 99)
         size = filepath.stat().st_size
-        # Negate size so larger = better (lower score when negated)
-        return (fmt, -size)
+        # Files directly in library_dir get a slight penalty vs. organised ones
+        depth_penalty = 0 if filepath.parent != library_dir else 1
+        return (fmt, depth_penalty, -size)
 
-    # Group files by normalised key
-    groups: dict = {}
+    # ── Pass 1: canonical key grouping ──────────────────────────────────────
+    groups: dict[tuple[str, str], list[Path]] = {}
     for f in files:
-        key = normalise_key(f)
+        key = canonical_key(f)
         groups.setdefault(key, []).append(f)
 
-    # Find groups with more than one file
-    dupes = {k: v for k, v in groups.items() if len(v) > 1}
+    dupes: dict[tuple[str, str], list[Path]] = {k: v for k, v in groups.items() if len(v) > 1}
 
-    if not dupes:
+    # ── Pass 2: fuzzy clustering on unmatched files ──────────────────────────
+    unmatched = [f for f, key in ((f, canonical_key(f)) for f in files)
+                 if key not in dupes or len(groups[key]) == 1]
+    # Build (canonical_string, filepath) pairs bucketed by first char
+    buckets: dict[str, list[tuple[str, Path]]] = {}
+    for f in unmatched:
+        a, t = canonical_key(f)
+        cs = f"{a} {t}"
+        bucket_key = cs[0] if cs else "#"
+        buckets.setdefault(bucket_key, []).append((cs, f))
+
+    fuzzy_groups: list[list[Path]] = []
+    for bucket in buckets.values():
+        used = set()
+        for i, (cs_i, f_i) in enumerate(bucket):
+            if i in used:
+                continue
+            cluster = [f_i]
+            for j, (cs_j, f_j) in enumerate(bucket[i + 1:], i + 1):
+                if j in used:
+                    continue
+                ratio = difflib.SequenceMatcher(None, cs_i, cs_j).ratio()
+                if ratio >= 0.92:
+                    cluster.append(f_j)
+                    used.add(j)
+            if len(cluster) > 1:
+                used.add(i)
+                fuzzy_groups.append(cluster)
+
+    if not dupes and not fuzzy_groups:
         print(f"No duplicates found in {library_dir} ({len(files)} tracks scanned)")
         return
 
-    total_dupes = sum(len(v) - 1 for v in dupes.values())
-    print(f"Found {len(dupes)} duplicate group(s) — {total_dupes} file(s) to remove\n")
+    total_exact = sum(len(v) - 1 for v in dupes.values())
+    total_fuzzy = sum(len(g) - 1 for g in fuzzy_groups)
+    total_dupes = total_exact + total_fuzzy
+    print(f"Found {len(dupes) + len(fuzzy_groups)} duplicate group(s) — "
+          f"{total_dupes} file(s) to remove"
+          + (f"  {C_DIM}({total_fuzzy} fuzzy){C_RESET}" if total_fuzzy else "")
+          + "\n")
     if dry_run:
         print("DRY RUN — no files will be deleted\n")
 
     removed = 0
     freed = 0
+    deleted_dirs: set[Path] = set()
 
-    sorted_dupes = sorted(dupes.items())
-    progress = _start_progress(len(sorted_dupes), "Removing duplicates")
-    for i, ((artist, title), group) in enumerate(sorted_dupes, 1):
-        progress.update(i - 1)
-        # Sort by quality — first entry is the keeper
-        group.sort(key=quality_score)
+    def _show_group(group: list[Path], match_type: str = "") -> None:
         keeper = group[0]
         to_delete = group[1:]
-
-        display_artist = artist.title() if artist else "Unknown Artist"
-        display_title = title.title()
-        print(f"  {display_artist} — {display_title}")
-        print(f"    {C_GREEN}keep{C_RESET}   {keeper.name}  {C_DIM}({keeper.suffix[1:].upper()}, {keeper.stat().st_size // 1024}KB){C_RESET}")
-
+        keeper_rel = keeper.relative_to(library_dir)
+        label = f"  {C_DIM}{match_type}{C_RESET}" if match_type else ""
+        print(f"{label}")
+        print(f"    {C_GREEN}keep{C_RESET}   {keeper_rel}  "
+              f"{C_DIM}({keeper.suffix[1:].upper()}, {keeper.stat().st_size // 1024}KB){C_RESET}")
         for f in to_delete:
+            rel = f.relative_to(library_dir)
             size_kb = f.stat().st_size // 1024
-            print(f"    {C_RED}delete{C_RESET} {f.name}  {C_DIM}({f.suffix[1:].upper()}, {size_kb}KB){C_RESET}")
+            print(f"    {C_RED}delete{C_RESET} {rel}  "
+                  f"{C_DIM}({f.suffix[1:].upper()}, {size_kb}KB){C_RESET}")
+
+    all_groups: list[tuple[list[Path], str]] = []
+    for (artist, title), group in sorted(dupes.items()):
+        group.sort(key=quality_score)
+        label = f"{artist.title() if artist else 'Unknown'} — {title.title()}"
+        all_groups.append((group, label))
+    for group in fuzzy_groups:
+        group.sort(key=quality_score)
+        a, t = canonical_key(group[0])
+        label = f"{a.title() if a else 'Unknown'} — {t.title()}  (fuzzy match)"
+        all_groups.append((group, label))
+
+    progress = _start_progress(len(all_groups), "Removing duplicates")
+    for i, (group, label) in enumerate(all_groups, 1):
+        progress.update(i - 1)
+        _show_group(group, label)
+        to_delete = group[1:]
+        for f in to_delete:
             if not dry_run:
                 freed += f.stat().st_size
+                deleted_dirs.add(f.parent)
                 f.unlink()
                 removed += 1
             else:
@@ -1267,6 +1470,18 @@ def remove_duplicates(library_dir: str | Path, dry_run: bool = False) -> None:
         progress.update(i)
 
     _end_progress(progress)
+
+    # Clean up empty directories left behind by deletions
+    if not dry_run and deleted_dirs:
+        for d in sorted(deleted_dirs, key=lambda p: len(p.parts), reverse=True):
+            if d == library_dir:
+                continue
+            try:
+                if d.exists() and not any(d.iterdir()):
+                    d.rmdir()
+            except Exception:
+                pass
+
     freed_mb = freed / (1024 * 1024)
     if dry_run:
         print(f"Would remove {total_dupes} file(s), freeing ~{freed_mb:.1f}MB")
@@ -2414,13 +2629,14 @@ def batch_rename_library(library_dir: str | Path, dry_run: bool = False) -> None
             undo_actions.append({"type": "rename", "src": str(old_path), "dest": str(new_path)})
             renamed += 1
 
-            # Update tags on the renamed file
+            # Update tags on the renamed file — title tag includes mix so it
+            # matches what's encoded in the filename: "Title (Mix)"
             try:
                 mf = mediafile.MediaFile(str(new_path))
                 if artist:
                     mf.artist = artist
                 if title:
-                    mf.title = title
+                    mf.title = title + (f" ({mix})" if mix else "")
                 mf.save()
             except Exception:
                 pass  # tag update is best-effort
@@ -2456,7 +2672,7 @@ C_GRAY = "\033[38;5;244m"
 C_BLUE = "\033[38;5;69m"
 C_BLUE_LT = "\033[38;5;111m"
 
-VERSION = "v1.4.2"
+VERSION = "v1.4.4"
 
 # ── SPLASH LOGO ────────────────────────────────────────────────────────────
 
@@ -3386,6 +3602,12 @@ def show_menu():
     print()
 
 
+def _menu_separator() -> None:
+    """Print a thin separator before the redrawn menu."""
+    width = get_term_width()
+    print(f"\n  {C_DIM}{'─' * min(width - 4, 48)}{C_RESET}\n")
+
+
 def interactive_menu():
     """Interactive CLI menu."""
     library_dir = LIBRARY_DIR
@@ -3420,7 +3642,8 @@ def interactive_menu():
             dry = ask_dry_run()
             print()
             process_folder(folder, library_dir, dry_run=dry, use_gemini=gemini, convert_flac=conv)
-            print()
+            _menu_separator()
+            show_menu()
 
         elif choice == "2":
             folder = pick_folder("Select source folder to clean up")
@@ -3430,25 +3653,29 @@ def interactive_menu():
             dry = ask_dry_run()
             print()
             clean_source_folder(folder, library_dir, dry_run=dry)
-            print()
+            _menu_separator()
+            show_menu()
 
         elif choice == "3":
             dry = ask_dry_run()
             print()
             fix_covers(library_dir, dry_run=dry)
-            print()
+            _menu_separator()
+            show_menu()
 
         elif choice == "4":
             dry = ask_dry_run()
             print()
             fix_tags(library_dir, dry_run=dry)
-            print()
+            _menu_separator()
+            show_menu()
 
         elif choice == "5":
             dry = ask_dry_run()
             print()
             remove_duplicates(library_dir, dry_run=dry)
-            print()
+            _menu_separator()
+            show_menu()
 
         elif choice == "6":
             if not check_ffmpeg():
@@ -3458,20 +3685,23 @@ def interactive_menu():
             keep = input(f"  {C_YELLOW}Keep original FLAC files after conversion? (y/N): {C_RESET}").strip().lower() in ("y", "yes")
             print()
             batch_convert_flac(library_dir, dry_run=dry, keep_original=keep)
-            print()
+            _menu_separator()
+            show_menu()
 
         elif choice == "7":
             dry = ask_dry_run()
             print()
             batch_rename_library(library_dir, dry_run=dry)
-            print()
+            _menu_separator()
+            show_menu()
 
         elif choice == "8":
             dry = ask_dry_run()
             org = input(f"  {C_YELLOW}Organize files into genre folders? (y/N): {C_RESET}").strip().lower() in ("y", "yes")
             print()
             ai_genre_tag(library_dir, dry_run=dry, organize=org)
-            print()
+            _menu_separator()
+            show_menu()
 
         elif choice == "9":
             if not check_ffmpeg():
@@ -3497,16 +3727,16 @@ def interactive_menu():
             lossless = input(f"  {C_YELLOW}Also scan lossless files (FLAC/WAV/AIFF) for transcode artifacts? (y/N): {C_RESET}").strip().lower() in ("y", "yes")
             print()
             analyze_bitrate_quality(library_dir, include_lossless=lossless, target_paths=targets)
-            print()
+            _menu_separator()
+            show_menu()
 
         elif choice == "u":
             undo_last_operation()
-            print()
+            _menu_separator()
+            show_menu()
 
         elif choice == "s":
             library_dir = settings_menu(library_dir)
-            print()
-            show_menu()
 
         elif choice == "?" or choice == "help":
             show_menu()

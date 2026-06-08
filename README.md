@@ -55,16 +55,18 @@ For each music file in a source folder:
 ## Features
 
 ### Import pipeline
-The core import flow: parse filenames, fetch metadata from Spotify/Discogs, copy to library with clean names and tags. Works with regex or Gemini AI for filename parsing.
+The core import flow: parse filenames, fetch metadata, copy to library with clean names and full tags. Lookup order: **iTunes** (primary, no auth) → **Spotify** (genre override) → **Discogs** (art fallback). Works with regex or Gemini AI for filename parsing.
+
+On a confident iTunes match (≥80% title similarity), the canonical artist name from Apple's catalog is used for both the filename and artist tag — fixing casing inconsistencies that come from filenames. Album, year, and album artist are always written from the best available source. Title and mix info always come from the filename parser and are never overwritten by an API.
 
 ### Fix missing covers
 Re-scans the library and fetches album art for any files missing cover images. Uses the same Spotify/Discogs lookup.
 
-### Fix tags from Spotify
-Updates album, year, and genre tags from Spotify for existing library files. Never changes artist, title, or duration - only supplementary metadata.
+### Fix tags
+Updates album, year, genre, and cover art for existing library files using iTunes (primary, no API key required) then Spotify (genre fallback when iTunes returns a broad label). Never changes artist, title, or duration.
 
 ### Remove duplicates
-Finds duplicate tracks by comparing normalized artist/title. Keeps the highest-quality version (FLAC > MP3, higher bitrate > lower).
+Finds duplicate tracks using a two-pass matcher: an exact canonical-key pass (strips mix/remix/feat annotations, normalizes collaboration separators) followed by a fuzzy pass (≥92% similarity) to catch typos and subtle variations. Shows each group with file paths relative to the library root so cross-folder duplicates are easy to spot. Keeps the highest-quality version (FLAC > AIFF/WAV > M4A > MP3 > OGG, then largest file). Empty folders left behind after deletion are automatically removed.
 
 ### Clean up source folder
 Finds files in a source folder that already have a matching copy in the library and offers to delete them. Requires explicit typed confirmation.
