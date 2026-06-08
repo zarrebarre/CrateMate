@@ -441,7 +441,10 @@ def itunes_search(artist: str, title: str) -> dict | None:
     """
     import difflib
 
-    query = f"{artist} {title}" if artist else title
+    # Strip trailing disambiguation suffixes like "(NZ)", "(UK)", "(US)" that
+    # appear in filenames but not in official release metadata.
+    artist_search = re.sub(r"\s*\([^)]+\)\s*$", "", artist).strip() if artist else artist
+    query = f"{artist_search} {title}" if artist_search else title
     try:
         resp = requests.get(
             "https://itunes.apple.com/search",
