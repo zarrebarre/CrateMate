@@ -450,30 +450,57 @@ def itunes_search(artist: str, title: str) -> dict | None:
     def _clean(s: str) -> str:
         s = _DEDUP_MIX.sub("", s)
         s = _DEDUP_FEAT.sub("", s)
+        s = re.sub(r"\s*[\(\[][^\)\]]+[\)\]]\s*", " ", s)  # strip all parenthetical content
         return re.sub(r"\s+", " ", s).strip().lower()
+
+    def _is_compilation(r: dict) -> bool:
+        album = (r.get("collectionName") or "").lower()
+        return any(kw in album for kw in [
+            "dj mix", "(mixed)", "top 100", "open air", "ibiza spring",
+            "ibiza summer", "edc ", "festival", " various", "compilation",
+            "residents b4b", "house hotties",
+        ])
 
     def _query_itunes(artist_q: str, title_q: str):
         try:
             resp = requests.get(
                 "https://itunes.apple.com/search",
                 params={"term": f"{artist_q} {title_q}".strip(),
-                        "media": "music", "entity": "song", "limit": 5},
+                        "media": "music", "entity": "song", "limit": 10},
                 timeout=8,
             )
             resp.raise_for_status()
-            return resp.json().get("results", [])
+            results = resp.json().get("results", [])
         except Exception:
             return []
+        # Sort: standalone singles/EPs before compilations so that when title
+        # scores are equal the original release wins over a festival set or mix.
+        return sorted(results, key=_is_compilation)
 
-    def _best_match(results: list, title_q: str):
+    def _best_match(results: list, title_q: str, artist_q: str = ""):
         parsed_clean = _clean(title_q)
+        artist_lower = artist_q.lower()
         best, best_score = None, 0.0
         for r in results:
-            score = difflib.SequenceMatcher(
+            title_score = difflib.SequenceMatcher(
                 None, parsed_clean, _clean(r.get("trackName", ""))
             ).ratio()
-            if score > best_score:
-                best_score = score
+
+            # Guard against same-title tracks by a different artist.
+            # Check if our artist appears inside iTunes artist or vice-versa
+            # (handles "Entasia" matching "Entasia & SHUFFA" correctly).
+            if artist_lower:
+                it_artist = (r.get("artistName") or "").lower()
+                contains = artist_lower in it_artist or it_artist in artist_lower
+                artist_sim = difflib.SequenceMatcher(None, artist_lower, it_artist).ratio()
+                artist_match = 0.9 if contains else artist_sim
+                if artist_match < 0.3:
+                    title_score *= 0.4   # heavy penalty — almost certainly wrong artist
+                elif artist_match < 0.5:
+                    title_score *= 0.75  # moderate penalty
+
+            if title_score > best_score:
+                best_score = title_score
                 best = r
         return best, best_score
 
@@ -481,10 +508,15 @@ def itunes_search(artist: str, title: str) -> dict | None:
         art_url = best.get("artworkUrl100", "")
         if art_url:
             art_url = re.sub(r"\d+x\d+bb", "600x600bb", art_url)
+        # Don't use a compilation/festival/mix-set as the track's album name —
+        # art, genre, year, and canonical artist from those results are still fine.
+        album_name = best.get("collectionName", "")
+        if _is_compilation(best):
+            album_name = ""
         return {
             "art_url": art_url or None,
             "genre": best.get("primaryGenreName", ""),
-            "album_name": best.get("collectionName", ""),
+            "album_name": album_name,
             "album_artist": best.get("artistName", ""),
             "year": (best.get("releaseDate") or "")[:4],
             "canonical_artist": best.get("artistName", ""),
@@ -497,7 +529,7 @@ def itunes_search(artist: str, title: str) -> dict | None:
 
     # ── Attempt 1: full artist + full title ──────────────────────────────────
     results = _query_itunes(artist_search, title)
-    best, score = _best_match(results, title)
+    best, score = _best_match(results, title, artist_search)
     if score >= 0.6:
         return _build_result(best, score)
 
@@ -507,7 +539,7 @@ def itunes_search(artist: str, title: str) -> dict | None:
     if " - " in title:
         title_last = title.rsplit(" - ", 1)[-1].strip()
         results2 = _query_itunes(artist_search, title_last)
-        best2, score2 = _best_match(results2, title_last)
+        best2, score2 = _best_match(results2, title_last, artist_search)
         if score2 >= 0.6:
             return _build_result(best2, score2)
 
