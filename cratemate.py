@@ -93,7 +93,7 @@ SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 DISCOGS_USER_TOKEN = os.environ.get("DISCOGS_USER_TOKEN", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 GEMINI_BATCH_SIZE = 30  # filenames per API call
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".aiff", ".aif", ".wav", ".m4a", ".ogg", ".opus"}
@@ -522,6 +522,7 @@ def itunes_search(artist: str, title: str) -> dict | None:
             "canonical_artist": best.get("artistName", ""),
             "canonical_title": best.get("trackName", ""),
             "confidence": score,
+            "is_compilation": _is_compilation(best),
         }
 
     # Strip trailing disambiguation suffixes like "(NZ)", "(UK)" from artist
@@ -550,6 +551,114 @@ def itunes_search(artist: str, title: str) -> dict | None:
 # one of these, try Spotify afterwards for a more specific override.
 _ITUNES_BROAD_GENRES = {"dance", "electronic", "music", "pop", "alternative",
                         "rock", "r&b/soul", "hip-hop/rap", "singer/songwriter"}
+
+# Confidence threshold for trusting iTunes' canonical artist/title over the
+# filename-parsed values. At/above this, the catalog title fixes casing,
+# punctuation, and garbled scene titles from messy downloads.
+ITUNES_CANONICAL_CONF = 0.8
+
+# Minimum similarity between the iTunes title and the filename-parsed title for
+# the catalog title to be adopted. High enough to allow casing/punctuation/typo
+# fixes, low enough to reject structural changes (dropped subtitles, wrong
+# matches like 'Calling (Lose My Mind)' → 'Calling').
+ITUNES_TITLE_SIM_MIN = 0.7
+
+# Mix/version descriptors stripped from an API title so the filename-parsed mix
+# can be re-appended without duplication — this is what preserves Extended /
+# Remix / Radio info even when iTunes lists only the original cut.
+_VERSION_KEYWORDS = (r"mix|mixed|remix|edit|dub|version|extended|original|radio|"
+                     r"club|vip|instrumental|vocal|acapella|rework|bootleg|"
+                     r"remaster(?:ed)?")
+_VERSION_PARENS = re.compile(
+    rf"\s*[\(\[][^\)\]]*\b(?:{_VERSION_KEYWORDS})\b[^\)\]]*[\)\]]", re.IGNORECASE)
+_VERSION_DASH = re.compile(
+    rf"\s*[-–]\s*[^-–]*\b(?:{_VERSION_KEYWORDS})\b.*$", re.IGNORECASE)
+# Collaboration credits iTunes bakes into titles (e.g. '(feat. X)',
+# '(Avicii vs. Nicky Romero)') — stripped so filenames stay clean.
+_COLLAB_PARENS = re.compile(
+    r"\s*[\(\[][^\)\]]*\b(?:feat\.?|ft\.?|featuring|with|vs\.?|versus)\b[^\)\]]*[\)\]]",
+    re.IGNORECASE)
+# Artist-credit separators, for detecting when iTunes would drop a collaborator.
+_ARTIST_SEP = re.compile(
+    r"\s*(?:&|,|;|/|\+|\bx\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|"
+    r"\bwith\b|\band\b)\s*", re.IGNORECASE)
+
+
+def strip_version_info(title: str) -> str:
+    """Remove mix/version and collaboration descriptors from an API title
+    (e.g. '(Extended Mix)', ' - Radio Edit', '(feat. X)', '(A vs. B)') so a
+    clean base title remains and the filename-parsed mix can be re-appended."""
+    title = _VERSION_PARENS.sub("", title)
+    title = _COLLAB_PARENS.sub("", title)
+    title = _VERSION_DASH.sub("", title)
+    return re.sub(r"\s+", " ", title).strip()
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """Punctuation-insensitive similarity ratio between two titles."""
+    import difflib
+    na = re.sub(r"\s+", " ", _DEDUP_NORM.sub("", a.lower())).strip()
+    nb = re.sub(r"\s+", " ", _DEDUP_NORM.sub("", b.lower())).strip()
+    if not na or not nb:
+        return 0.0
+    return difflib.SequenceMatcher(None, na, nb).ratio()
+
+
+def _artist_tokens(s: str) -> list[str]:
+    """Split a credit string into normalized individual artist names."""
+    return [re.sub(r"\s+", " ", p).strip().lower()
+            for p in _ARTIST_SEP.split(s or "") if p.strip()]
+
+
+def _drops_artist(parsed: str, canonical: str) -> bool:
+    """True if adopting ``canonical`` would drop an artist present in ``parsed``
+    (e.g. 'Duty Paid & Groove Decapitation' → 'Duty Paid', or losing a '(NZ)'
+    disambiguator). Expansions and pure casing changes are allowed."""
+    cset = _artist_tokens(canonical)
+    for p in _artist_tokens(parsed):
+        if not any(p == c or p in c for c in cset):
+            return True
+    return False
+
+
+def canonical_base_title(parsed_title: str, itunes: dict | None) -> str:
+    """Choose the base (mix-less) title to use for a track.
+
+    Adopts iTunes' canonical title only when confident, the match is not a
+    compilation, and — after stripping version/collab descriptors — it's a
+    close variant of the filename-parsed title (so casing/punctuation/typos are
+    fixed, but dropped subtitles and wrong matches are rejected). Otherwise
+    keeps the filename-parsed title. Never returns an empty string.
+    """
+    if not (itunes and itunes.get("confidence", 0) >= ITUNES_CANONICAL_CONF):
+        return parsed_title
+    if itunes.get("is_compilation"):
+        return parsed_title
+    ct = strip_version_info(itunes.get("canonical_title", ""))
+    if not ct:
+        return parsed_title
+    if _title_similarity(ct, parsed_title) < ITUNES_TITLE_SIM_MIN:
+        return parsed_title
+    return ct
+
+
+def canonical_artist_name(parsed_artist: str, itunes: dict | None) -> str:
+    """Choose the artist name to use for a track.
+
+    Adopts iTunes' canonical artist only when confident, not a compilation, and
+    it doesn't drop a collaborator from the parsed credit. This fixes casing and
+    expands credits (e.g. 'Baron Von Trax' → 'Baron Von Trax & Centre Court')
+    without losing co-artists or disambiguators. Otherwise keeps the parsed
+    artist.
+    """
+    if not (itunes and itunes.get("confidence", 0) >= ITUNES_CANONICAL_CONF):
+        return parsed_artist
+    if itunes.get("is_compilation"):
+        return parsed_artist
+    ca = (itunes.get("canonical_artist") or "").strip()
+    if not ca or _drops_artist(parsed_artist, ca):
+        return parsed_artist
+    return ca
 
 
 # ── GEMINI AI NAME FIXING ──────────────────────────────────────────────────
@@ -843,6 +952,28 @@ def find_audio_files(directory: str | Path) -> list[Path]:
     )
 
 
+def _safe_rename(old: Path, new_name: str) -> Path | None:
+    """Rename ``old`` to ``new_name`` in the same directory.
+
+    Handles macOS's case-insensitive filesystem (a case-only change collides
+    with itself, so it routes through a temp name) and refuses to clobber a
+    different existing file. Returns the new path, or None if a real collision
+    blocked the rename.
+    """
+    new = old.parent / new_name
+    if new == old:
+        return old
+    if new.exists() and not old.samefile(new):
+        return None  # a different file already has that name — refuse
+    if new.exists():  # same inode, case-only rename → two-step via temp
+        tmp = old.with_name(".__cmtmp__" + new_name)
+        old.rename(tmp)
+        tmp.rename(new)
+    else:
+        old.rename(new)
+    return new
+
+
 def parse_library_filename(filepath: str | Path) -> tuple[str, str, str]:
     """Parse artist, title, mix from a clean library filename like 'Artist - Title (Mix).ext'.
 
@@ -1022,10 +1153,21 @@ def process_file(filepath: str | Path, library_dir: Path, dry_run: bool = False,
             genre = itunes["genre"]
             print(f"    Genre:   {genre}")
 
-        # Canonical artist — only when confident enough to trust the match
-        if conf >= 0.8 and itunes.get("canonical_artist"):
-            artist = itunes["canonical_artist"]
+        # Canonical artist — trust iTunes at high confidence (fixes casing,
+        # expands collaboration credits).
+        new_artist = canonical_artist_name(artist, itunes)
+        if new_artist != artist:
+            artist = new_artist
             print(f"    Artist → {artist}  {C_DIM}(iTunes canonical){C_RESET}")
+
+        # Canonical title — trust iTunes' clean catalog title at high confidence
+        # for the base name (fixes casing/punctuation/garbled scene titles). The
+        # mix is parsed from the filename and re-appended below, so Extended /
+        # Remix / Radio info is always preserved.
+        new_title = canonical_base_title(title, itunes)
+        if new_title != title:
+            print(f"    Title → {new_title}  {C_DIM}(iTunes canonical){C_RESET}")
+            title = new_title
     else:
         print(f"    iTunes:  no match")
 
@@ -1244,8 +1386,10 @@ def fix_covers(library_dir: str | Path, dry_run: bool = False) -> None:
 def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
     """Update supplementary tags using iTunes (primary) then Spotify (genre fallback).
 
-    Safe to update: album, album artist, year, genre, cover art
-    Never touches: title, artist, duration, BPM, key, track number
+    Updates: album, album artist, year, genre, cover art. Also corrects the
+    artist and title (tags + filename) from iTunes' canonical values when the
+    match is confident (>= ITUNES_CANONICAL_CONF), preserving the filename's
+    mix/version. Never touches: duration, BPM, key, track number.
     """
     library_dir = Path(library_dir)
     files = find_audio_files(library_dir)
@@ -1264,7 +1408,11 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
     progress = _start_progress(len(files), "Fixing tags")
     for i, filepath in enumerate(files, 1):
         progress.set_message(f"Fixing {filepath.name[:40]}")
-        artist, title_clean, _mix = parse_library_filename(filepath)
+        artist, title_clean, mix = parse_library_filename(filepath)
+        # Normalize an all-lower/all-upper mix to title case (matches the import
+        # parser); mixed-case mixes like "TMU Extended Mix" are left untouched.
+        if mix and (mix == mix.lower() or mix == mix.upper()):
+            mix = smart_title(mix)
 
         print(f"\n  {filepath.name}")
 
@@ -1293,6 +1441,15 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
             if itunes.get("art_url"):
                 new_art_url = itunes["art_url"]
 
+        # Canonical artist + title — adopt iTunes' clean catalog values at high
+        # confidence. The mix is parsed from the filename and re-appended, so
+        # Extended/Remix info is preserved.
+        new_base_title = canonical_base_title(title_clean, itunes)
+        new_artist = canonical_artist_name(artist, itunes)
+        title_changed = new_base_title != title_clean
+        artist_changed = bool(new_artist) and new_artist != artist
+        final_artist = new_artist if artist_changed else artist
+
         # ── Spotify (genre override when iTunes genre too broad) ─────────────
         if not itunes or not new_genre or new_genre.lower() in _ITUNES_BROAD_GENRES:
             search_artist = artist if artist else title_clean
@@ -1311,7 +1468,8 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
                 if not new_year and spotify.get("year") and spotify["year"] != "0000":
                     new_year = spotify["year"]
 
-        if not any([new_album, new_albumartist, new_genre, new_art_url, new_year]):
+        if not any([new_album, new_albumartist, new_genre, new_art_url, new_year,
+                    title_changed, artist_changed]):
             print(f"    No match found — skipping")
             skipped += 1
             progress.update(i)
@@ -1319,6 +1477,12 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
 
         # Determine what actually needs changing
         changes = []
+
+        if artist_changed:
+            changes.append(("artist", artist, new_artist))
+
+        if title_changed:
+            changes.append(("title", title_clean, new_base_title))
 
         if new_album and mf.album != new_album:
             changes.append(("album", mf.album, new_album))
@@ -1359,6 +1523,10 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
             continue
 
         try:
+            if artist_changed:
+                mf.artist = new_artist
+            if title_changed:
+                mf.title = new_base_title + (f" ({mix})" if mix else "")
             if new_album:
                 mf.album = new_album
             if new_albumartist:
@@ -1373,6 +1541,14 @@ def fix_tags(library_dir: str | Path, dry_run: bool = False) -> None:
             if art_data:
                 mf.art = art_data
             mf.save()
+            # Rename the file to match the corrected artist/title (mix preserved).
+            if (artist_changed or title_changed) and final_artist:
+                ext = filepath.suffix
+                new_name = (f"{safe_filename(final_artist)} - {safe_filename(new_base_title)}"
+                            + (f" ({safe_filename(mix)})" if mix else "") + ext)
+                if _safe_rename(filepath, new_name) is None:
+                    print(f"    {C_YELLOW}tags fixed; rename skipped "
+                          f"(a different file named {new_name} exists){C_RESET}")
             print(f"    Tags updated!")
             updated += 1
         except Exception as e:
@@ -2723,7 +2899,7 @@ C_GRAY = "\033[38;5;244m"
 C_BLUE = "\033[38;5;69m"
 C_BLUE_LT = "\033[38;5;111m"
 
-VERSION = "v1.4.4"
+VERSION = "v1.4.5"
 
 # ── SPLASH LOGO ────────────────────────────────────────────────────────────
 
@@ -3640,7 +3816,7 @@ def show_menu():
     print()
     print(f"  {C_DIM}Library{C_RESET}")
     print(f"  {C_GREEN}3{C_RESET}  Fix missing covers")
-    print(f"  {C_GREEN}4{C_RESET}  Fix tags from Spotify")
+    print(f"  {C_GREEN}4{C_RESET}  Fix tags (iTunes + Spotify)")
     print(f"  {C_GREEN}5{C_RESET}  Remove duplicates")
     print(f"  {C_GREEN}6{C_RESET}  Convert FLACs to MP3")
     print(f"  {C_GREEN}7{C_RESET}  Batch rename files {C_MAGENTA}(Gemini){C_RESET}")

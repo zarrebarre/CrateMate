@@ -31,3 +31,6 @@ FEATURE_PLAN.md
 FIX_REPORT.md
 PORTFOLIO.md
 assets/
+
+# Personal Spotify playlist gap checker (not part of the distributed project)
+playlist_sync/

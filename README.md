@@ -57,13 +57,13 @@ For each music file in a source folder:
 ### Import pipeline
 The core import flow: parse filenames, fetch metadata, copy to library with clean names and full tags. Lookup order: **iTunes** (primary, no auth) → **Spotify** (genre override) → **Discogs** (art fallback). Works with regex or Gemini AI for filename parsing.
 
-On a confident iTunes match (≥80% title similarity), the canonical artist name from Apple's catalog is used for both the filename and artist tag — fixing casing inconsistencies that come from filenames. Album, year, and album artist are always written from the best available source. Title and mix info always come from the filename parser and are never overwritten by an API.
+On a confident iTunes match (≥80% confidence), the canonical **artist and title** from Apple's catalog are used for both the filename and tags — fixing casing, punctuation, and garbled scene-release names that come from messy downloads. The **mix/version** (Extended Mix, Original Mix, a remixer's name, etc.) is always parsed from the filename and re-appended, so it is never lost even though iTunes usually lists only the original cut. Album, year, and album artist are written from the best available source. When there's no confident match (e.g. underground tracks), the filename parser's title is kept as-is.
 
 ### Fix missing covers
 Re-scans the library and fetches album art for any files missing cover images. Uses the same Spotify/Discogs lookup.
 
 ### Fix tags
-Updates album, year, genre, and cover art for existing library files using iTunes (primary, no API key required) then Spotify (genre fallback when iTunes returns a broad label). Never changes artist, title, or duration.
+Updates album, year, genre, and cover art for existing library files using iTunes (primary, no API key required) then Spotify (genre fallback when iTunes returns a broad label). On a confident iTunes match it also corrects the **artist and title** (tags *and* filename) — fixing casing, punctuation, and garbled names, and expanding collaboration credits — while preserving the filename's mix/version. Never changes duration.
 
 ### Remove duplicates
 Finds duplicate tracks using a two-pass matcher: an exact canonical-key pass (strips mix/remix/feat annotations, normalizes collaboration separators) followed by a fuzzy pass (≥92% similarity) to catch typos and subtle variations. Shows each group with file paths relative to the library root so cross-folder duplicates are easy to spot. Keeps the highest-quality version (FLAC > AIFF/WAV > M4A > MP3 > OGG, then largest file). Empty folders left behind after deletion are automatically removed.
@@ -98,7 +98,7 @@ Long-running operations show a single-line progress indicator with counter, ETA,
 
   Library
   3  Fix missing covers
-  4  Fix tags from Spotify
+  4  Fix tags (iTunes + Spotify)
   5  Remove duplicates
   6  Convert FLACs to MP3
   7  Batch rename files (Gemini)

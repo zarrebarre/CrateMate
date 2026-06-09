@@ -1,6 +1,6 @@
 [project]
 name = "cratemate"
-version = "1.4.4"
+version = "1.4.5"
 description = "Smart music file organizer for DJs"
 license = "MIT"
 readme = "README.md"
